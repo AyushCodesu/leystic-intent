@@ -3,63 +3,42 @@ import { openXAction, scanXNowAction } from "@/app/app/x/actions";
 import { PaidButton } from "@/components/PaidButton";
 import { ListSkeleton } from "@/components/Skeleton";
 import { StartOnOpen } from "@/components/StartOnOpen";
-import { VerdictBadge } from "@/components/VerdictBadge";
 import { LeadWorkspace } from "@/components/leads/LeadWorkspace";
 import { OpeningProvider } from "@/components/leads/opening";
 import { PeopleStrip } from "@/components/leads/PeopleStrip";
 import { Fleeting } from "@/components/Fleeting";
 import { ScanDone, ScanRunning } from "@/components/leads/ScanBanner";
-import { entryHref } from "@/components/leads/workspace";
 import { XFilters } from "@/components/x/XFilters";
-import { XLeftOutSection, XMaybeSection, XSearches } from "@/components/x/XGroups";
-import { filteredPointer } from "@/components/x/filtered";
+import { XSearches } from "@/components/x/XGroups";
+import { XOpportunityList } from "@/components/x/XOpportunityList";
 import { XLeadDetail, type XSelection } from "@/components/x/XLeadDetail";
-import { XLeadRow, repliedHandle } from "@/components/x/XLeadRow";
-import { XReplyChip } from "@/components/x/XReplyChip";
 import { config } from "@/lib/config";
 import { atBounds, atKey, grainOf, type FeedParams } from "@/lib/feed";
-import { compactCount, errorSentence, relativeAge, relativeUntil } from "@/lib/format";
+import { errorSentence, relativeAge, relativeUntil } from "@/lib/format";
 import { limitsForUser } from "@/lib/tier";
 import { DAY_MS } from "@/lib/time";
 import { QUIET_RECHECK_DAYS } from "@/lib/x/constants";
+import { X_PRIORITY_FLOOR } from "@/lib/x/priority";
 import { allowanceFor } from "@/lib/throttle";
 import { withParams } from "@/lib/url";
 import {
   X_STATUSES,
-  listXFaces,
-  listXFiltered,
-  listXHeld,
+  listXOpportunities,
+  xOpportunityCard,
   listXLanes,
-  listXLeads,
   projectedWalletCostPerDay,
   xEvaluationEntry,
+  xEvaluationReplied,
   xLeadById,
   xThreadOf,
   xStatus,
   type XFeedFilter,
-  type XFiltered,
-  type XFilteredCard,
-  type XHeldCard,
-  type XLeadCard,
+  type XOpportunity,
   type XStatus,
   type XStatusFilter,
 } from "@/lib/x/read";
 
-const NOTHING_FILTERED: XFiltered = { items: [], judged: 0, screened: 0, unfinished: 0, closeCalls: 0, worth: 0, pending: 0 };
-
 export type XParams = { project?: string; days?: string; status?: string; at?: string; lead?: string };
-
-/**
- * What a row says after its age: how many had seen the post at lurk's last
- * fetch of it (X's count then, never an estimate; the pane says when), for
- * a reply-worthy post whether a reply now still lands, and for a post found
- * through a reply in its thread whose reply that was.
- */
-function rowMeta(lead: XLeadCard): string | null {
-  const views = lead.viewCount !== null && lead.viewCount > 0 ? `${compactCount(lead.viewCount)} views` : null;
-  const via = lead.via && !lead.foundBy ? `via @${lead.via.author}'s reply` : null;
-  return [lead.kind === "reply" && lead.fresh ? "reply now" : null, views, via].filter(Boolean).join(" · ") || null;
-}
 
 /** How long after a check ends its banner may still be shown once, to someone who opens the tab late. */
 const DONE_BANNER_MS = 30 * 60_000;
@@ -112,7 +91,7 @@ function quietClause(status: XStatus): string {
   if (!status.quiet.quiet || status.lastFailure) return "";
   const weekly =
     status.nextScanAt && status.lastScanAt && status.nextScanAt.getTime() - status.lastScanAt.getTime() >= (QUIET_RECHECK_DAYS - 1) * DAY_MS;
-  return weekly ? " X is quiet for this product, so it is checked weekly." : " X is quiet for this product, so after the next check it is checked weekly.";
+  return weekly ? " Checks are currently weekly." : " After the next check, checks are weekly.";
 }
 
 /** A slice key the strip could have made, or nothing. */
@@ -126,31 +105,15 @@ function listSearch(params: XParams): string {
   return withParams(params, { lead: undefined });
 }
 
-/**
- * The post the pane opens on: the one the URL names, even once it has left the
- * list (just marked replied, hidden or not a fit), or else the newest lead. A
- * held or filtered-out post opens only when asked for: with no leads it would
- * front an empty list with a post the list itself says is not a lead.
- */
+/** Open the requested card, or the strongest opportunity (including uncertain ones). */
 async function openOn(
   projectId: string,
-  leads: XLeadCard[],
-  held: XHeldCard[],
-  filtered: XFilteredCard[],
+  opportunities: XOpportunity[],
   requested?: string,
+  history = false,
 ): Promise<XSelection | null> {
-  const lead = leads.find((one) => one.entryId === requested);
-  if (lead) {
-    return { kind: "lead", lead };
-  }
-  const item = held.find((one) => one.entryId === requested);
-  if (item) {
-    return { kind: "held", item };
-  }
-  const out = filtered.find((one) => one.entryId === requested);
-  if (out) {
-    return { kind: "filtered", item: out };
-  }
+  const found = opportunities.find((one) => xOpportunityCard(one.entry).entryId === requested);
+  if (found) return found.entry;
   // A held or filtered-out post the list no longer has: pushed past the cap by
   // a scan, outside a narrower window, or since held, left out or made a lead.
   // It keeps the id it was asked by, which is what the opening row waits for.
@@ -165,7 +128,7 @@ async function openOn(
     const moved = await xLeadById(projectId, requested.slice("lead-".length));
     if (moved) return { kind: "lead", lead: moved };
   }
-  return leads[0] ? { kind: "lead", lead: leads[0] } : null;
+  return opportunities.find((one) => history || (one.priority !== null && one.priority >= X_PRIORITY_FLOOR))?.entry ?? null;
 }
 
 /** A group's name and count, stuck to the top of the list column while its rows scroll under it. */
@@ -184,10 +147,7 @@ function ArrivingLeads() {
   return (
     <div className="flex flex-col">
       <p className="text-small border-b p-3 text-fg-muted">
-        lurk is reading the last 30 days of X for people asking for what you do, leaving the products you compete with or
-        building their own, and popular posts showing how people do what you sell, and keeps watching from here. X
-        matches words exactly, so this is a short list, not a feed: a few posts a week is normal, and some products see
-        none.
+        lurk is searching X and checking posts against your product. Matches are ranked as evidence arrives.
       </p>
       <ListSkeleton rows={4} bare fade={0.2} />
     </div>
@@ -233,8 +193,8 @@ function emptySentence(
     return "Your X searches are paused: they found nothing worth showing, or nothing at all for days. Quiet ones are tried again each week, and changing your product or competitors on the Product page starts them all again.";
   }
   return status.lastRun
-    ? `Nobody on X asked for what you do or posted anything worth a reply in this window. The last check saw ${status.lastRun.postsNew} new posts and judged ${status.lastRun.judged}.`
-    : "Nobody on X asked for what you do or posted anything worth a reply in this window.";
+    ? `No stored opportunities match this window and your filters. The last check saw ${status.lastRun.postsNew} new posts and judged ${status.lastRun.judged}.`
+    : "No stored opportunities match this window and your filters.";
 }
 
 /**
@@ -251,42 +211,23 @@ export async function XTab({ userId, project, params }: { userId: string; projec
   };
 
   const tier = await limitsForUser(userId);
-  const [status, found, held, filtered, lanes, faces, allowance] = await Promise.all([
+  const [status, opportunities, lanes, allowance] = await Promise.all([
     xStatus(project.id),
-    listXLeads(project.id, filter),
-    filter.status === "new" ? listXHeld(project.id, filter) : Promise.resolve([]),
-    filter.status === "new" ? listXFiltered(project.id, filter) : Promise.resolve(NOTHING_FILTERED),
+    listXOpportunities(project.id, filter, new Date(), config().X_REPLIES),
     listXLanes(project.id),
-    listXFaces(project.id, filter),
     allowanceFor(userId, "x_scan_now"),
   ]);
   const activeLanes = lanes.filter((lane) => lane.state === "active");
   // Until the first check finishes there is nothing to scan again or to price.
   const firstCheck = !status.lastScanAt;
-  const asks = found.filter((lead) => lead.kind === "ask");
-  // X_REPLIES off hides replies already found, as well as stopping new ones.
-  const replies = config().X_REPLIES ? found.filter((lead) => lead.kind === "reply") : [];
-  // Asks first, then posts worth a reply, in one list: each row's badge says which it is.
-  const leads = [...asks, ...replies];
-  const selection = await openOn(project.id, leads, held, filtered.items, params.lead);
-  const selectedId = selection ? (selection.kind === "lead" ? selection.lead.entryId : selection.item.entryId) : null;
-  const selectedCard = selection ? (selection.kind === "lead" ? selection.lead : selection.item) : null;
-  const thread = selectedCard ? await xThreadOf(selectedCard.tweetId, selectedCard.via?.tweetId ?? null) : null;
-  const row = (lead: XLeadCard, trailing: React.ReactNode, meta: string | null = null) => (
-    <XLeadRow
-      key={lead.entryId}
-      id={lead.entryId}
-      href={entryHref(params, lead.entryId)}
-      selected={lead.entryId === selectedId}
-      headline={lead.headline}
-      author={lead.authorUsername}
-      avatarUrl={lead.authorImage}
-      createdAt={lead.postedAt}
-      replyingTo={repliedHandle(lead.replyingTo)}
-      meta={meta}
-      trailing={trailing}
-    />
-  );
+  const selection = await openOn(project.id, opportunities.items, params.lead, filter.status !== "new");
+  const selectedCard = selection ? xOpportunityCard(selection) : null;
+  const selectedId = selectedCard?.entryId ?? null;
+  const selectedOpportunity = opportunities.items.find((item) => xOpportunityCard(item.entry).entryId === selectedId);
+  const [thread, replied] = await Promise.all([
+    selectedCard ? xThreadOf(selectedCard.tweetId, selectedCard.via?.tweetId ?? null) : null,
+    selection && selection.kind !== "lead" ? xEvaluationReplied(project.id, selection.item.evaluationId) : false,
+  ]);
 
   return (
     // The Leads tab's frame: from lg up the page is the window under the
@@ -325,7 +266,8 @@ export async function XTab({ userId, project, params }: { userId: string; projec
         </div>
 
         <PeopleStrip
-          faces={faces}
+          noun={filter.status === "new" ? "match" : "lead"}
+          faces={opportunities.faces}
           days={filter.days}
           at={filter.at}
           params={params as FeedParams}
@@ -338,30 +280,28 @@ export async function XTab({ userId, project, params }: { userId: string; projec
             backHref={`?${listSearch(params)}`}
             list={
               <>
-                {/* The count is asks, as the strip and the rail count them; posts worth a reply are noted beside it. */}
-                <GroupHeader label="Leads" count={asks.length} note={replies.length > 0 ? `+ ${replies.length} to reply to` : null} />
-                {leads.length === 0 && firstCheck && (status.running || !status.lastFailure) && filter.status === "new" ? (
+                <GroupHeader label={filter.status === "new" ? "Opportunities" : "Leads"} count={opportunities.total} />
+                {opportunities.items.length === 0 && firstCheck && (status.running || !status.lastFailure) && filter.status === "new" ? (
                   <ArrivingLeads />
-                ) : leads.length === 0 ? (
+                ) : opportunities.items.length === 0 ? (
                   <p className="text-small p-3 text-fg-muted">
                     {emptySentence(filter, status, lanes.length, activeLanes.length, project.name, !allowance.spent)}
-                    {filter.status === "new" ? ` ${filteredPointer(filtered, held.length) ?? ""}` : null}
                   </p>
                 ) : (
-                  leads.map((lead) =>
-                    row(
-                      lead,
-                      lead.kind === "ask" ? <VerdictBadge fit={lead.fit} intent={lead.intent} /> : <XReplyChip moment={lead.moment} />,
-                      rowMeta(lead),
-                    ),
-                  )
+                  <>
+                    {filter.status === "new" && !opportunities.items.some((item) => item.priority !== null && item.priority >= X_PRIORITY_FLOOR) ? (
+                      <p className="text-small p-3 text-fg-muted">No high-priority matches yet. Lower-priority posts are still available below.</p>
+                    ) : null}
+                    <XOpportunityList items={opportunities.items} params={params} selectedId={selectedId} showDivider={filter.status === "new"} />
+                    {opportunities.total > opportunities.items.length ? (
+                      <p className="text-small p-3 text-fg-muted">The top {opportunities.items.length} of {opportunities.total} authors are listed. Narrow the date window to see more.</p>
+                    ) : null}
+                  </>
                 )}
-                <XMaybeSection held={held} filtered={filtered} params={params} selectedId={selectedId} />
-                <XLeftOutSection filtered={filtered} params={params} selectedId={selectedId} />
                 <XSearches lanes={lanes} />
               </>
             }
-            pane={selection ? <XLeadDetail selection={selection} projectId={project.id} thread={thread} /> : null}
+            pane={selection ? <XLeadDetail selection={selection} projectId={project.id} thread={thread} replied={replied} opportunity={filter.status === "new" ? selectedOpportunity : undefined} /> : null}
           />
         </OpeningProvider>
       </div>

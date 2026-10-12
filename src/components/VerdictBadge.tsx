@@ -51,11 +51,13 @@ export function VerdictBadge({ fit, intent, className }: VerdictBadgeProps) {
   }
   return (
     <span
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-mono whitespace-nowrap",
+      // cn treats this custom font-size token as a text colour and otherwise
+      // drops it when applying the tone. Keep sizing independent of colour.
+      className={`text-mono ${cn(
+        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 whitespace-nowrap",
         rank === null ? "text-fg-muted" : tone,
         className,
-      )}
+      )}`}
       // The rubric's own sentences, so the chip can always be checked.
       title={judgementSentence(fit, intent) ?? undefined}
     >

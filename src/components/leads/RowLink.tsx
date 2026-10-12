@@ -31,7 +31,7 @@ export function RowLink({ href, summary, selectedOnServer, nested, children }: R
       prefetch={false}
       onClick={() => open(summary)}
       aria-current={selected ? "true" : undefined}
-      className={`transition-motion flex items-start gap-2.5 border-b py-2.5 pr-3 last:border-b-0 ${
+      className={`group/lead-row transition-motion flex items-start gap-2.5 border-b py-2.5 pr-3 last:border-b-0 focus-visible:bg-surface-2 ${
         nested ? "pl-10" : "pl-3"
       } ${
         selected ? "bg-surface-2" : "hover:bg-surface-2"

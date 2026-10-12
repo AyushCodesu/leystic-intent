@@ -20,9 +20,10 @@ const NOT_FIT_REASONS = [
 export type LeadActionHandlers = {
   replied: () => Promise<void>;
   reopen: () => Promise<void>;
-  hide: () => Promise<void>;
-  /** Comes back with a sentence when it refused, which shows under the picker. */
-  notFit: (formData: FormData) => Promise<ActionResult>;
+  /** Absent for a post that is not a lead (an X post New ranked from evidence): there is no lead to hold the mark. */
+  hide?: () => Promise<void>;
+  /** Comes back with a sentence when it refused, which shows under the picker. Absent as hide is. */
+  notFit?: (formData: FormData) => Promise<ActionResult>;
   /** Mutes where the lead was found, with the button's words ("Mute r/saas"). */
   mute?: { label: string; action: () => Promise<void> };
 };
@@ -31,7 +32,7 @@ type LeadActionsProps = {
   /** The filled button's words: "Open on Reddit", "Open on X". */
   openLabel: string;
   url: string;
-  /** Null for a post that is not a lead (a held X post): it gets only the link. */
+  /** Null for a post that gets only the link. */
   actions: LeadActionHandlers | null;
   /** The thread is already marked replied, so the button takes that back instead. */
   replied?: boolean;
@@ -80,15 +81,17 @@ export function LeadActions({ openLabel, url, actions, replied = false, reasons 
                 </Button>
               </form>
             )}
-            <form action={actions.hide}>
-              <Button type="submit" variant="ghost" size="sm">
-                <EyeOff className={iconClass} aria-hidden="true" />
-                Hide
-              </Button>
-            </form>
-            {picking ? (
+            {actions.hide ? (
+              <form action={actions.hide}>
+                <Button type="submit" variant="ghost" size="sm">
+                  <EyeOff className={iconClass} aria-hidden="true" />
+                  Hide
+                </Button>
+              </form>
+            ) : null}
+            {!actions.notFit ? null : picking ? (
               <form
-                action={async (formData) => setError(await errorFrom(() => actions.notFit(formData)))}
+                action={async (formData) => setError(await errorFrom(() => actions.notFit!(formData)))}
                 className="flex items-center gap-1.5"
               >
                 <Select

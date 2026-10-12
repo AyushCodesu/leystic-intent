@@ -17,6 +17,8 @@ type PeopleStripProps = {
   params: FeedParams;
   /** The feed's filter pills, drawn on the strip's top line, or alone when there is no strip. */
   filters: React.ReactNode;
+  /** X's ranked stream contains matches, including unqualified opportunities. */
+  noun?: "lead" | "match";
 };
 
 /** What the window over the strip is called, in the sentence above it. */
@@ -43,9 +45,9 @@ function href(params: FeedParams, at: string | null): string {
   return `?${withParams(params, { lead: undefined, at })}`;
 }
 
-function counted(column: StreamColumn): string {
+function counted(column: StreamColumn, noun: "lead" | "match"): string {
   const total = column.faces.length;
-  return `${total} ${total === 1 ? "lead" : "leads"}`;
+  return `${total} ${total === 1 ? noun : noun === "match" ? "matches" : "leads"}`;
 }
 
 /**
@@ -67,7 +69,7 @@ function counted(column: StreamColumn): string {
  * Reddit, so sixty copies of the same mark said nothing and covered a sixth of
  * each picture at the size these are drawn.
  */
-export function PeopleStrip({ faces, days, at, params, filters }: PeopleStripProps) {
+export function PeopleStrip({ faces, days, at, params, filters, noun = "lead" }: PeopleStripProps) {
   if (faces.length === 0) {
     return filters;
   }
@@ -82,7 +84,7 @@ export function PeopleStrip({ faces, days, at, params, filters }: PeopleStripPro
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <figcaption className="flex flex-wrap items-baseline gap-x-2">
           <span style={{ fontWeight: 500 }}>
-            {faces.length} {faces.length === 1 ? "lead" : "leads"} {at ? atSentence(at) : `in ${WINDOW[`${days}`]}`}.
+            {faces.length} {faces.length === 1 ? noun : noun === "match" ? "matches" : "leads"} {at ? atSentence(at) : `in ${WINDOW[`${days}`]}`}.
           </span>
           {at ? (
             <Link className="text-small text-fg-muted underline" href={href(params, null)}>
@@ -149,7 +151,7 @@ export function PeopleStrip({ faces, days, at, params, filters }: PeopleStripPro
                       index === 0 ? "left-0" : index === last ? "right-0" : "left-1/2 -translate-x-1/2",
                     )}
                   >
-                    {picked ? "Clear" : "Filter to"} {column.label} · {counted(column)}
+                    {picked ? "Clear" : "Filter to"} {column.label} · {counted(column, noun)}
                   </span>
                 ) : null}
               </span>

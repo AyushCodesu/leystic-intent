@@ -1,6 +1,7 @@
 import { and, desc, eq, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
-import { handledThreads, xEvaluations, xLeads } from "@/db/schema";
+import { handledThreads, xEvaluations, xLeads, xPosts } from "@/db/schema";
+import { markThreadReplied, reopenThread } from "@/lib/handled";
 import { xAskScore, type ScoringSettings } from "@/lib/scoring/weights";
 import { X_SCORER_VERSION } from "./constants";
 import type { XAssessment } from "./judge";
@@ -321,4 +322,31 @@ export async function xLeadConversation(projectId: string, leadId: string): Prom
     .where(and(eq(xLeads.projectId, projectId), eq(xLeads.id, leadId)))
     .limit(1);
   return row ? (row.conversationId ?? row.tweetId) : null;
+}
+
+/**
+ * Replied, or taken back, on a post that is not a lead (one New ranked from its
+ * stored evidence). Marking answers its conversation, as for a lead. Taking it
+ * back clears a mark on the conversation and on the post itself, since New
+ * hides the post by either and a mark made before X gave its conversation sits
+ * under the post's own id. False when the evaluation is not this project's.
+ */
+export async function markXEvaluationReplied(projectId: string, evaluationId: string, replied: boolean): Promise<boolean> {
+  const [row] = await db()
+    .select({ conversationId: xPosts.conversationId, tweetId: xPosts.id })
+    .from(xEvaluations)
+    .innerJoin(xPosts, eq(xPosts.id, xEvaluations.tweetId))
+    .where(and(eq(xEvaluations.projectId, projectId), eq(xEvaluations.id, evaluationId)))
+    .limit(1);
+  if (!row) {
+    return false;
+  }
+  if (replied) {
+    await markThreadReplied(projectId, "x", row.conversationId ?? row.tweetId);
+  } else {
+    for (const thread of new Set([row.conversationId ?? row.tweetId, row.tweetId])) {
+      await reopenThread(projectId, "x", thread);
+    }
+  }
+  return true;
 }

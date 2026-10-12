@@ -8,7 +8,7 @@ import { requireXProject } from "@/lib/owned";
 import { pressForJob } from "@/lib/throttle";
 import { openX } from "@/lib/x/open";
 import { markLanesDue } from "@/lib/x/run";
-import { setXLeadStatus, xLeadConversation } from "@/lib/x/write";
+import { markXEvaluationReplied, setXLeadStatus, xLeadConversation } from "@/lib/x/write";
 
 /**
  * The tab is on screen: the first open queues the first check, later opens
@@ -56,6 +56,24 @@ export async function reopenXLeadAction(projectId: string, leadId: string) {
   if (conversation) {
     await reopenThread(projectId, "x", conversation);
   }
+  revalidatePath("/app", "layout");
+}
+
+/**
+ * Replied on a post New ranked from its evidence alone: its conversation is
+ * answered exactly as a lead's is, so it leaves New. Nothing becomes a lead and
+ * no alert is sent; hiding or calling a miss needs a lead row to hold it.
+ */
+export async function repliedXEvaluationAction(projectId: string, evaluationId: string) {
+  await requireXProject(projectId);
+  await markXEvaluationReplied(projectId, evaluationId, true);
+  revalidatePath("/app", "layout");
+}
+
+/** Takes that Replied back: the post returns to New as it was. */
+export async function reopenXEvaluationAction(projectId: string, evaluationId: string) {
+  await requireXProject(projectId);
+  await markXEvaluationReplied(projectId, evaluationId, false);
   revalidatePath("/app", "layout");
 }
 

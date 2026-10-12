@@ -15,6 +15,8 @@ type XLeadRowProps = {
   /** A short mono fact after the age, such as a reply-worthy post's views. */
   meta?: string | null;
   trailing: React.ReactNode;
+  /** Lower visual emphasis, without hiding the post or weakening its interaction states. */
+  subdued?: boolean;
 };
 
 /**
@@ -22,7 +24,7 @@ type XLeadRowProps = {
  * its platform's mark, the ask, then where and when in mono, and one rating.
  * Where a Reddit row names its community, an X row names its author.
  */
-export function XLeadRow({ id, href, selected, headline, author, avatarUrl, createdAt, replyingTo, meta, trailing }: XLeadRowProps) {
+export function XLeadRow({ id, href, selected, headline, author, avatarUrl, createdAt, replyingTo, meta, trailing, subdued = false }: XLeadRowProps) {
   return (
     <RowLink
       href={href}
@@ -39,9 +41,11 @@ export function XLeadRow({ id, href, selected, headline, author, avatarUrl, crea
         platform: "x",
       }}
     >
-      <AuthorAvatar name={author} src={avatarUrl} size={24} platform="x" />
+      <span className={subdued ? "shrink-0 grayscale opacity-60 transition-[opacity,filter] group-hover/lead-row:grayscale-0 group-hover/lead-row:opacity-100 group-focus-visible/lead-row:grayscale-0 group-focus-visible/lead-row:opacity-100 group-aria-[current=true]/lead-row:grayscale-0 group-aria-[current=true]/lead-row:opacity-100" : "shrink-0"}>
+        <AuthorAvatar name={author} src={avatarUrl} size={24} platform="x" />
+      </span>
       <span className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="text-small text-fg max-sm:line-clamp-2 sm:truncate" style={{ fontWeight: 500 }}>
+        <span className={`text-small max-sm:line-clamp-2 sm:truncate ${subdued ? "font-normal text-fg-muted transition-[color] group-hover/lead-row:text-fg group-focus-visible/lead-row:text-fg group-aria-[current=true]/lead-row:text-fg" : "font-medium text-fg"}`}>
           {headline}
         </span>
         <span className="flex min-w-0 items-center gap-2">
