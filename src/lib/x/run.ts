@@ -45,7 +45,7 @@ import { ownWords } from "./map";
 import { semaphore } from "./pace";
 import { checkReply } from "./reply";
 import { emptyCounts, finishXRun, markFirstLead, startXRun, type XRunCounts } from "./report";
-import { freeScreen, isListicle, isOwnOrRivalAccount, isVendorHook, matchedLaneTerms, PITCH_REASONS } from "./screen";
+import { freeScreen, isListicle, isOwnOrRivalAccount, isVendorHook, matchedLaneTerms, PITCH_REASONS, type ScreenReason } from "./screen";
 import { venueScore, type XSignals } from "./gates";
 import { searched, xQuiet } from "./quiet";
 import { reachScore } from "./reach";
@@ -56,6 +56,7 @@ import { xPostsById, type StoredXPost, type XVia } from "./store";
 import { slug } from "./words";
 import {
   askFrom,
+  claimForBuyerLane,
   claimForThread,
   claimForVenue,
   fillMatchedPhrase,
@@ -923,7 +924,8 @@ export async function runXScan(projectId: string, jobId: string | null): Promise
     );
   };
 
-  const seen = new Set<string>();
+  // Each post this run has screened, with why the lane that saw it first dropped it.
+  const seen = new Map<string, ScreenReason | null>();
   let firstLookPages = FIRST_LOOK_PAGES;
 
   const searchLane = async (lane: Lane): Promise<void> => {
@@ -1019,9 +1021,9 @@ export async function runXScan(projectId: string, jobId: string | null): Promise
     for (const post of posts) {
       // A venue lane still reads a post another lane of this run saw: the rival
       // screen's one-sentence rule may have dropped a workflow it would keep.
-      if (seen.has(post.id) && !venue) continue;
+      // So does a buyer lane one that lane dropped for not showing its words.
       const seenBefore = seen.has(post.id);
-      seen.add(post.id);
+      if (seenBefore && !venue && seen.get(post.id) !== "no_visible_term") continue;
       const screen = freeScreen({
         post,
         since,
@@ -1032,6 +1034,7 @@ export async function runXScan(projectId: string, jobId: string | null): Promise
         financeProduct,
         venue,
       });
+      if (!seenBefore) seen.set(post.id, screen.pass ? null : screen.reason);
       const stage = screen.pass ? (post.isReply ? "pending_parent" : "pending_llm") : "free_rejected";
       const matchedPhrase = matchedLaneTerms(post, lane.terms, venue);
       const sighting = await insertSighting({
@@ -1045,9 +1048,12 @@ export async function runXScan(projectId: string, jobId: string | null): Promise
       if (!sighting) {
         // A thread's walk may have written it first: the words this search matched still show on its card.
         if (screen.pass && matchedPhrase) await fillMatchedPhrase(projectId, post.id, matchedPhrase);
-        // A post a rival lane screened out that a venue lane keeps is the venue lane's to judge.
-        if (venue && screen.pass && !processed.has(post.id)) {
-          const claimed = await claimForVenue({ projectId, tweetId: post.id, laneId: lane.id, stage, matchedPhrase });
+        // A post a rival or request lane screened out that a venue lane keeps is
+        // the venue lane's to judge; one any lane dropped only for its words is
+        // the buyer lane's whose words it shows.
+        if (screen.pass && !processed.has(post.id)) {
+          const claim = venue ? claimForVenue : claimForBuyerLane;
+          const claimed = await claim({ projectId, tweetId: post.id, laneId: lane.id, stage, matchedPhrase });
           if (claimed) track(claimed, post);
         }
         continue;

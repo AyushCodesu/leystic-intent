@@ -9,7 +9,7 @@
 /** Bumped whenever a question, a gate or the judge's state changes. Never Reddit's SCORER_VERSION. */
 export const X_SCORER_VERSION = "x-2026-09-28.3";
 /** Bumped whenever the lane templates change, so every project recompiles its lanes. */
-export const X_LANES_VERSION = "x-lanes-2026-09-28.3";
+export const X_LANES_VERSION = "x-lanes-2026-10-12.2";
 /** Bumped whenever the reply check's prompt or its decision changes. */
 export const X_REPLY_VERSION = "x-reply-2026-09-28.1";
 /**

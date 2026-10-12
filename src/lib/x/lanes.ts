@@ -14,7 +14,7 @@ import { isAmbiguous, normalizeEntity, slug } from "./words";
  * and the words never do, so a model fills the words (seeds.ts) and this file
  * fills the shapes.
  *
- * Three families, from what a live probe of seven unlike products found on
+ * The first three families came from what a live probe of seven unlike products found on
  * 2026-09-27 (.context/x-general: 48 searches, 521 posts, labelled and
  * skeptic-checked):
  * - rival: someone leaving, weighing or stuck on a named rival. The buyers:
@@ -28,9 +28,16 @@ import { isAmbiguous, normalizeEntity, slug } from "./words";
  * Price complaints on their own (0 of 51), open calls (0 of 29), hiring and
  * opening posts (0 of 36) and pain phrasing without a named system found
  * nothing, and are not lanes.
+ * - request: someone asking for a thing of the product's category by name
+ *   ("looking for a screen recorder", "best booking page?"). In a blind
+ *   grading of 415 archived posts (October 2026) these lanes found 12 of the
+ *   14 good leads; diy and stack found none. Buyers, so not a venue family,
+ *   and replies are kept: an ask is often a reply in someone else's thread.
+ *   A second request shape names the coined rivals instead of the category
+ *   ("Best self hosted open source calendly, cal?"); see compileRivalRequestLane.
  */
 
-export type LaneFamily = "rival" | "diy" | "stack";
+export type LaneFamily = "rival" | "request" | "diy" | "stack";
 
 /** The families whose posts may be worth a reply though nobody in them is shopping: a venue, not a buyer. */
 export const VENUE_FAMILIES: ReadonlySet<string> = new Set<LaneFamily>(["diy", "stack"]);
@@ -87,6 +94,9 @@ export const DIY_WORDS = [
   "replacing",
   "vibecoded",
 ];
+
+/** Requests for something to use, not bare categories or generic how-to posts. */
+export const REQUEST_WORDS = ["looking for", "recommend", "recommendations", "suggest", "suggestions", "need a", "need an", "alternative", "alternatives", "best", "which", "anyone know", "what do you use"];
 
 /**
  * The tools and phrases a workflow post is written in. The founder's best
@@ -318,6 +328,16 @@ export function everydayNames(ordinary: Iterable<string>): Set<string> {
   return names;
 }
 
+function isCommonRival(entity: string, everyday: Set<string>): boolean {
+  return isAmbiguous(entity) || everyday.has(slug(entity));
+}
+
+/** The rivals that may share an OR group, in standing order: coined names that can make a rival lane alone. */
+function coinedRivals(seeds: string[], ordinary: Iterable<string> = []): string[] {
+  const everyday = everydayNames(ordinary);
+  return seeds.filter((entity) => !isCommonRival(entity, everyday) && coinedRivalLane([entity]) !== null);
+}
+
 /**
  * Rival lanes. Coined names share one OR group, up to MAX_RIVALS_PER_LANE and
  * the lane limit, bound to RIVAL_WORDS. A name that is also an everyday word
@@ -327,7 +347,6 @@ export function everydayNames(ordinary: Iterable<string>): Set<string> {
  * cannot make a lane on its own is skipped, so it never sinks the others.
  */
 export function compileRivalLanes(seeds: string[], ordinary: Iterable<string> = []): CompiledLane[] {
-  const everyday = everydayNames(ordinary);
   const lanes: CompiledLane[] = [];
   let current: string[] = [];
   const flush = () => {
@@ -336,20 +355,15 @@ export function compileRivalLanes(seeds: string[], ordinary: Iterable<string> = 
     if (lane) lanes.push(lane);
     current = [];
   };
-  const common: string[] = [];
-  for (const entity of seeds) {
-    if (isAmbiguous(entity) || everyday.has(slug(entity))) {
-      common.push(entity);
-      continue;
-    }
-    if (!coinedRivalLane([entity])) continue;
+  for (const entity of coinedRivals(seeds, ordinary)) {
     const next = [...current, entity];
     const fits = next.length <= MAX_RIVALS_PER_LANE && bodyOf([next, RIVAL_WORDS]).length <= MAX_LANE_BODY_CHARS;
     if (!fits) flush();
     current.push(entity);
   }
   flush();
-  for (const entity of common) {
+  const everyday = everydayNames(ordinary);
+  for (const entity of seeds.filter((seed) => isCommonRival(seed, everyday))) {
     const lane = commonRivalLane(entity);
     if (lane) lanes.push(lane);
   }
@@ -368,6 +382,60 @@ function excluded(ownNames: string[], rivals: string[]) {
 function seedTerms(slots: SeedSlots, ownNames: string[], rivals: string[]) {
   const opts = { ...excluded(ownNames, rivals), dropGeneric: true };
   return { artifacts: slotTerms(slots.artifacts, opts), topics: slotTerms(slots.topics, opts) };
+}
+
+/**
+ * A project's category/request lanes: one per specific (multi-word) category
+ * noun among the first two the seeds name, each ANDed with REQUEST_WORDS.
+ * A broad single word ("geo", "leads", "scraping") or a rival is never one.
+ * Separate lanes so one broad OR group cannot consume every result page;
+ * supplied singular/plural variants stay together in one lane. No new model
+ * seeds: the saved noun slots are reused. No filters, so replies are kept.
+ */
+export function compileRequestLanes(slots: SeedSlots | null, rivals: string[], ownNames: string[]): CompiledLane[] {
+  if (!slots) return [];
+  const { artifacts, topics } = seedTerms(slots, ownNames, rivals);
+  const groups = new Map<string, string[]>();
+  for (const term of [...artifacts, ...topics]) {
+    if (!term.includes(" ")) continue;
+    const key = term.endsWith("s") && !term.endsWith("ss") ? term.slice(0, -1) : term;
+    const group = groups.get(key);
+    if (group) {
+      if (!group.includes(term)) group.push(term);
+    } else if (groups.size < 2) {
+      groups.set(key, [term]);
+    }
+  }
+  return [...groups.values()].flatMap((nouns) => {
+    const lane = laneOf("request", [nouns, REQUEST_WORDS], ([kept]) => ({ label: `Asking for ${kept[0]}`, seeds: [] }));
+    return lane ? [lane] : [];
+  });
+}
+
+/** REQUEST_WORDS without "alternative(s)": a rival named beside those is the rival lane's. */
+export const RIVAL_REQUEST_WORDS = REQUEST_WORDS.filter((term) => term !== "alternative" && term !== "alternatives");
+
+/**
+ * The rival-request lane: the coined rivals (the ones compileRivalLanes puts in
+ * a shared OR group, never an everyday-word rival such as loom or notion), up
+ * to MAX_RIVALS_PER_LANE, ANDed with RIVAL_REQUEST_WORDS. Someone asking which
+ * tool to use, by a rival's name: "Best self hosted open source calendly,
+ * cal?". Rivals are trimmed to fit, never the words. At most one per project.
+ * A request lane, so its posts get buyer screening and replies are kept.
+ *
+ * In live pilot r84 (2026-10-05..12, five projects, both arms on the same
+ * window, blind-graded by Opus 5.5 and GPT-6 Astra) this shape found a
+ * consensus-good lead in 4 of 5 projects from 33 screened posts: Cal.com
+ * ("Best self hosted open source calendly, cal?"), Tally ("Google forms just
+ * wasn't working… suggestions"), Grenseo and Scarlett ("ManyChat as a customer
+ * support bot"), the first good leads in that window for Cal.com and ever for
+ * Scarlett. The new searches overall found 14 consensus-good leads to the
+ * current lanes' 8; a small sample.
+ */
+export function compileRivalRequestLane(rivals: string[], ordinary: Iterable<string> = []): CompiledLane | null {
+  const coined = coinedRivals(rivals, ordinary).slice(0, MAX_RIVALS_PER_LANE);
+  if (coined.length === 0) return null;
+  return laneOf("request", [coined, RIVAL_REQUEST_WORDS], ([kept]) => ({ label: `Asking about ${listed(kept)}`, seeds: kept }));
 }
 
 /**
@@ -449,13 +517,21 @@ export function compileStackLane(slots: SeedSlots | null, rivals: string[], ownN
 
 /**
  * A project's lanes in rank order, which a run capped to its first few (a
- * trial-size dev run) takes them in: the first rival lane (the buyers), then
- * build-vs-buy, then the workflow lane, then the other rival lanes. Three
- * lanes so hold one of each family.
+ * trial-size dev run) takes them in: the category/request lanes first (they
+ * found 12 of 14 good leads in the October 2026 grading), the rival-request
+ * lane, then the first rival lane (the buyers), build-vs-buy, the workflow
+ * lane, then the other rival lanes. Request lanes share the existing page and
+ * judge allowances.
  */
-export function orderLanes(rival: CompiledLane[], diy: CompiledLane | null, stack: CompiledLane | null): CompiledLane[] {
+export function orderLanes(
+  rival: CompiledLane[],
+  diy: CompiledLane | null,
+  stack: CompiledLane | null,
+  request: CompiledLane[] = [],
+  rivalRequest: CompiledLane | null = null,
+): CompiledLane[] {
   const [first, ...rest] = rival;
-  return [first, diy, stack, ...rest].filter((lane): lane is CompiledLane => Boolean(lane));
+  return [...request, rivalRequest, first, diy, stack, ...rest].filter((lane): lane is CompiledLane => Boolean(lane));
 }
 
 /** Every lane for a project, compiled and ordered. */
@@ -465,6 +541,8 @@ export function compileLanes(input: { rivals: string[]; slots: SeedSlots | null;
     compileRivalLanes(rivals, slots?.ordinaryWordRivals ?? []),
     compileDiyLane(slots, rivals, ownNames),
     compileStackLane(slots, rivals, ownNames),
+    compileRequestLanes(slots, rivals, ownNames),
+    compileRivalRequestLane(rivals, slots?.ordinaryWordRivals ?? []),
   );
 }
 

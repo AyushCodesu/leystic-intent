@@ -75,12 +75,13 @@ function page(items: Item[], nextCursor: string | null = null) {
 }
 
 type Page = ReturnType<typeof page>;
-type Family = "rival" | "diy" | "stack";
+type Family = "rival" | "request" | "diy" | "stack";
 
 /** Which family a query sent to X belongs to, from the words lanes.ts binds each to. */
 function familyOfQuery(query: string): Family {
   if (query.includes(" min_faves:")) return "stack";
   if (query.includes('"vibe coded"')) return "diy";
+  if (query.includes('"looking for"')) return "request";
   return "rival";
 }
 
@@ -793,11 +794,19 @@ describeDb("the X pipeline against a database", () => {
       .from(schema.xLanes)
       .where(orm.eq(schema.xLanes.projectId, project.id))
       .orderBy(schema.xLanes.rank);
-    expect(lanes.map((lane) => lane.family)).toEqual(["rival", "diy", "stack"]);
-    expect(lanes[1].body.startsWith(`(${rival} OR "booking page") ("vibe coded" OR`)).toBe(true);
+    expect(lanes.map((lane) => lane.family)).toEqual(["request", "request", "rival", "diy", "stack"]);
+    // The request lane keeps replies: an ask is often a reply in someone else's thread.
+    expect(lanes[0].body).toMatch(/^"booking page" \("looking for" OR .*\) lang:en -filter:retweets$/u);
+    // The rival-request lane: the coined rival asked about, without "alternative".
+    expect(lanes[1].body).toMatch(new RegExp(`^${rival} \\("looking for" OR .*\\) lang:en -filter:retweets$`, "u"));
+    expect(lanes[1].body).not.toContain("alternative");
+    expect(lanes[3].body.startsWith(`(${rival} OR "booking page") ("vibe coded" OR`)).toBe(true);
     // A lone generic word is dropped; the workflow lane asks for top-level posts with reach.
-    expect(lanes[2].body).toMatch(new RegExp(`^\\("claude code" OR .*\\) ${topic} lang:en -filter:retweets -filter:replies min_faves:20$`, "u"));
-    expect(search).toHaveBeenCalledTimes(3);
+    expect(lanes[4].body).toMatch(new RegExp(`^\\("claude code" OR .*\\) ${topic} lang:en -filter:retweets -filter:replies min_faves:20$`, "u"));
+    // The category request query is shared across projects and may already be
+    // cached by another test; the four unique rival/topic queries still reach X.
+    expect(search.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(search.mock.calls.length).toBeLessThanOrEqual(5);
     const [state] = await db().select().from(schema.xProjects).where(orm.eq(schema.xProjects.projectId, project.id));
     expect((state.seeds as { slots: { topics: string[] } }).slots.topics).toEqual([topic, "app"]);
 
@@ -834,13 +843,16 @@ describeDb("the X pipeline against a database", () => {
       .where(orm.eq(schema.xLanes.projectId, project.id))
       .orderBy(schema.xLanes.rank);
     expect(lanes.map((lane) => [lane.family, lane.runs])).toEqual([
+      ["request", 2],
       ["rival", 2],
       ["diy", 2],
       ["stack", 2],
       ["rival", 2],
     ]);
-    expect(lanes[0].body.startsWith(`${rival} (alternative`)).toBe(true);
-    expect(lanes[3].body.startsWith('("alternative to loom"')).toBe(true);
+    // The rival-request lane names the coined rival only, never "loom".
+    expect(lanes[0].body.startsWith(`${rival} ("looking for"`)).toBe(true);
+    expect(lanes[1].body.startsWith(`${rival} (alternative`)).toBe(true);
+    expect(lanes[4].body.startsWith('("alternative to loom"')).toBe(true);
     expect(lanes.some((lane) => /\bthis\b/u.test(lane.body.split(" lang:")[0]))).toBe(false);
   });
 
@@ -1096,6 +1108,76 @@ describeDb("the X pipeline against a database", () => {
     expect((await leadsOf(project.id))[0]).toMatchObject({ kind: "reply", moment: "workflow" });
   });
 
+  /** A category noun no other test searches for, so the request lane's page is this test's own. */
+  function uniqueNoun(rival: string): string {
+    return `${rival.slice("calendly".length)} page`;
+  }
+
+  /** A post whose category and request words sit sentences apart, which only the rival lane's screen keeps. */
+  function splitAsk(noun: string, rival: string, over: Item = {}): Item {
+    return item(`Our ${noun} keeps breaking every week. Is there an alternative to ${rival}?`, over);
+  }
+
+  it("lets the rival lane judge a post the request lanes of the same run dropped for not showing their words", async () => {
+    wallet.connected = true;
+    const rival = uniqueRival();
+    const noun = uniqueNoun(rival);
+    const { project } = await fixture([rival]);
+    modelAnswers((call) => {
+      if (call.purpose === "x_seeds") return slots({ artifacts: [noun] });
+      throw new Error("no reply check here");
+    });
+    const ask = splitAsk(noun, rival);
+    // The request lanes run first and read it first; the rival lane's page comes back after.
+    search.mockImplementation(async (input: { query: string }) => {
+      const family = familyOfQuery(input.query);
+      if (family === "rival") await new Promise((resolve) => setTimeout(resolve, 200));
+      return page(family === "request" || family === "rival" ? [ask] : []);
+    });
+    await openX(project.id);
+    await run.runXScan(project.id, null);
+    const [evaluation] = await evaluationsOf(project.id);
+    const rivalLane = await laneOf(project.id, "rival");
+    expect(evaluation).toMatchObject({ tweetId: ask.id, laneId: rivalLane.id, stage: "lead", freeReject: null });
+    expect(await leadsOf(project.id)).toHaveLength(1);
+  });
+
+  it("lets the rival lane claim on a later run a post a request lane dropped for its words, but never one dropped for who wrote it", async () => {
+    wallet.connected = true;
+    const rival = uniqueRival();
+    const noun = uniqueNoun(rival);
+    const { project } = await fixture([rival]);
+    modelAnswers((call) => {
+      if (call.purpose === "x_seeds") return slots({ artifacts: [noun] });
+      throw new Error("no reply check here");
+    });
+    const ask = splitAsk(noun, rival);
+    // Three conversations on one page by one author is a farm, whatever the next lane's page shows of them.
+    const farmer = { authorUsername: `farm${ask.id as string}`.slice(0, 15) };
+    const farmed = [splitAsk(noun, rival, farmer), splitAsk(noun, rival, farmer), splitAsk(noun, rival, farmer)];
+    serve("request", page([ask, ...farmed]));
+    await openX(project.id);
+    await run.runXScan(project.id, null);
+    const first = new Map((await evaluationsOf(project.id)).map((row) => [row.tweetId, row]));
+    expect(first.get(ask.id as string)).toMatchObject({ stage: "free_rejected", freeReject: "no_visible_term" });
+    expect(first.get(farmed[0].id as string)).toMatchObject({ stage: "free_rejected", freeReject: "reply_farm" });
+
+    // The next run's rival lane finds the ask and one of the farmed posts, alone on its page.
+    await forgetPages(project.id);
+    await run.markLanesDue(project.id);
+    serve("rival", page([ask, farmed[0]]));
+    await run.runXScan(project.id, null);
+    const rivalLane = await laneOf(project.id, "rival");
+    const second = new Map((await evaluationsOf(project.id)).map((row) => [row.tweetId, row]));
+    expect(second.get(ask.id as string)).toMatchObject({ laneId: rivalLane.id, stage: "lead", freeReject: null });
+    expect(second.get(farmed[0].id as string)).toMatchObject({
+      laneId: first.get(farmed[0].id as string)!.laneId,
+      stage: "free_rejected",
+      freeReject: "reply_farm",
+    });
+    expect((await leadsOf(project.id)).map((lead) => lead.tweetId)).toEqual([ask.id]);
+  });
+
   it("checks weekly once an empty first look read the last month, and daily again after anything is found", async () => {
     // A wallet, so scans in one test day never run out of pages: a run cut short is never quiet.
     wallet.connected = true;
@@ -1160,7 +1242,7 @@ describeDb("the X pipeline against a database", () => {
     await run.markLanesDue(project.id);
     await run.runXScan(project.id, null);
     expect(callsFor("rival")).toHaveLength(1);
-    const [lane] = await db().select().from(schema.xLanes).where(orm.eq(schema.xLanes.projectId, project.id)).orderBy(schema.xLanes.rank);
+    const lane = await laneOf(project.id, "rival");
     expect(lane.fullPages).toBe(1);
   });
 

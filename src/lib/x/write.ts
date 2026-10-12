@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { handledThreads, xEvaluations, xLeads } from "@/db/schema";
 import { xAskScore, type ScoringSettings } from "@/lib/scoring/weights";
@@ -42,19 +42,36 @@ export async function insertSighting(row: {
 }
 
 /**
- * Hands a post to a venue lane when the lane that saw it first was a rival
- * lane whose screen dropped it: the rival screen asks for its words in one
- * sentence and treats numbered steps as a listicle, and a workflow post is
- * both. Only a post nothing was paid for moves. Returns the row to judge, or
+ * Hands a post to a venue lane when the lane that saw it first was a buyer
+ * lane (rival or request) whose screen dropped it: that screen asks for its
+ * words in one sentence and treats numbered steps as a listicle, and a
+ * workflow post is both. Only a post nothing was paid for moves. Returns the row to judge, or
  * null when it is not the venue lane's to take.
  */
-export async function claimForVenue(row: {
-  projectId: string;
-  tweetId: string;
-  laneId: string;
-  stage: string;
-  matchedPhrase: string | null;
-}): Promise<XEvaluation | null> {
+export async function claimForVenue(row: LaneClaim): Promise<XEvaluation | null> {
+  // A thread's walk screens by the rule of the reply's lane, whichever family that was.
+  return claimForLaneIf(
+    row,
+    sql`(${xEvaluations.laneId} is null or ${xEvaluations.laneId} in (select id from x_lanes where family in ('rival', 'request')) or ${xEvaluations.context} ? 'via')`,
+  );
+}
+
+/**
+ * Hands a post to a buyer lane (rival or request) whose screen keeps it when
+ * the lane that saw it first dropped it only for not showing its words: which
+ * words those are is each lane's own, so "Our booking page keeps breaking. Is
+ * there an alternative to Calendly?" fails a category lane's one-sentence rule
+ * and passes the rival lane's. A post dropped for who wrote it, its age or its
+ * shape stays dropped, and only a post nothing was paid for moves. Returns the
+ * row to judge, or null when it is not this lane's to take.
+ */
+export async function claimForBuyerLane(row: LaneClaim): Promise<XEvaluation | null> {
+  return claimForLaneIf(row, eq(xEvaluations.freeReject, "no_visible_term"));
+}
+
+type LaneClaim = { projectId: string; tweetId: string; laneId: string; stage: string; matchedPhrase: string | null };
+
+async function claimForLaneIf(row: LaneClaim, condition: SQL): Promise<XEvaluation | null> {
   const [claimed] = await db()
     .update(xEvaluations)
     // Its wait starts now: the pending and reply clocks read createdAt.
@@ -64,8 +81,7 @@ export async function claimForVenue(row: {
         eq(xEvaluations.projectId, row.projectId),
         eq(xEvaluations.tweetId, row.tweetId),
         eq(xEvaluations.stage, "free_rejected"),
-        // A thread's walk screens by the rule of the reply's lane, whichever family that was.
-        sql`(${xEvaluations.laneId} is null or ${xEvaluations.laneId} in (select id from x_lanes where family = 'rival') or ${xEvaluations.context} ? 'via')`,
+        condition,
       ),
     )
     .returning();
