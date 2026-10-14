@@ -16,26 +16,21 @@ function opportunity(id: string, priority: number | null): XOpportunity {
   return { entry: { kind: "held", item: card }, priority, checks: ["Check requirements"] };
 }
 
-it("renders uncertain opportunities in one stream, selects them, and keeps weaker/unscored cards accessible", () => {
+it("draws posts that are not leads with evidence words, quieter below the floor, and keeps every one selectable", () => {
   const html = renderToStaticMarkup(createElement(XOpportunityList, {
     items: [opportunity("strong", 0.55), opportunity("weak", 0.2), opportunity("unknown", null)],
-    params: {}, selectedId: "held-strong",
+    params: {}, selectedId: "held-strong", ranked: true,
   }));
   expect(html).toContain('aria-current="true"');
   expect(html).toContain(">Potential match<");
   expect(html).not.toMatch(/priority \d+/u);
   expect(html).toContain("Check requirements");
-  expect(html.match(/Weaker matches below/gu)).toHaveLength(1);
-  expect(html.indexOf("Request strong")).toBeLessThan(html.indexOf("Weaker matches below"));
-  expect(html.indexOf("Weaker matches below")).toBeLessThan(html.indexOf("Request weak"));
   expect(html).toContain("Request unknown");
   expect(html).toContain(">Weaker match<");
   expect(html).toContain(">Unassessed<");
-  expect(html).not.toContain(">Maybe<");
-  expect(html).not.toContain(">Left out<");
 });
 
-it("uses ranked evidence rather than old lead verdicts in New, but preserves verdicts in history", () => {
+it("gives leads their verdict and other posts their evidence words", () => {
   const held = opportunity("qualified", 0.2);
   if (held.entry.kind !== "held") throw new Error("Expected held fixture");
   const qualified: XOpportunity = {
@@ -46,9 +41,10 @@ it("uses ranked evidence rather than old lead verdicts in New, but preserves ver
     } },
     checks: [],
   };
-  const ranked = renderToStaticMarkup(createElement(XOpportunityBadge, { opportunity: qualified }));
-  expect(ranked).toContain(">Weaker match<");
-  expect(ranked).not.toContain("Strong lead");
+  // New lists leads with their verdict, whatever their evidence order.
+  const listed = renderToStaticMarkup(createElement(XOpportunityList, { items: [qualified], params: {}, selectedId: null }));
+  expect(listed).toContain("Strong lead");
+  expect(listed).not.toContain("Weaker match");
   const history = renderToStaticMarkup(createElement(XOpportunityBadge, { opportunity: { ...qualified, priority: null }, ranked: false }));
   expect(history).toContain("Strong lead");
   expect(history).not.toContain("Unassessed");

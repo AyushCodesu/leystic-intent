@@ -7,7 +7,7 @@ import { filteredStrength, filteredSummary, filteredWord } from "@/components/x/
 import type { XFiltered, XFilteredCard, XHeldCard, XLaneView } from "@/lib/x/read";
 
 /** One collapsible group's header: its name and count, the Leads group's own look. */
-function GroupSummary({ label, count, warm = false }: { label: string; count: number; warm?: boolean }) {
+export function GroupSummary({ label, count, warm = false }: { label: string; count: number; warm?: boolean }) {
   return (
     <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2">
       <ChevronRight className="transition-motion size-3.5 text-fg-muted group-open:rotate-90" aria-hidden="true" />

@@ -81,21 +81,32 @@ describeDb("the ranked X window", () => {
     expect(feed.items).toHaveLength(200);
     expect(feed.total).toBe(207);
     expect(xOpportunityCard(feed.items[0].entry).tweetId).toBe(strong);
-    // The date strip is drawn from the whole ranked window, not the listed 200.
-    expect(feed.faces).toHaveLength(207);
-    const [evaluation] = await db().select().from(xEvaluations).where(and(eq(xEvaluations.projectId, project.id), eq(xEvaluations.tweetId, unlisted)));
     expect(feed.items.some((item) => xOpportunityCard(item.entry).tweetId === unlisted)).toBe(false);
-    expect(feed.faces.find((face) => face.id === `filtered-${evaluation.id}`)?.at.getTime()).toBeLessThan(Date.now() - 2 * 86_400_000);
+    // The date strip shows who is asking; none of these is a lead.
+    expect(feed.faces).toEqual([]);
+    expect(feed.leads).toBe(0);
   });
 
-  it("ranks the evidence of a post the legacy score merged away, one card per author, unless their lead there was acted on", async () => {
+  it("lists leads first, asks then replies, and draws the strip from asks alone", async () => {
+    const project = await fixture();
+    const strongHeld = await add(project.id, "strong held", { stage: "review", level: "complete", author: "held1" });
+    const weak = { ...good, own_need: { type: "noul", noul: 0.1 } };
+    const reply = await add(project.id, "reply lead", { stage: "lead", status: "new", kind: "reply", author: "r1", signals: weak });
+    const ask = await add(project.id, "ask lead", { stage: "lead", status: "new", author: "a1", signals: weak, ageDays: 4 });
+    const feed = await listXOpportunities(project.id, { days: 7, status: "new" });
+    expect(feed.items.map((x) => xOpportunityCard(x.entry).tweetId)).toEqual([ask, reply, strongHeld]);
+    expect([feed.leads, feed.replies, feed.total]).toEqual([1, 1, 3]);
+    expect(feed.faces.map((face) => face.author)).toEqual(["a1"]);
+  });
+
+  it("keeps an author's lead over a sibling the legacy score merged away, and neither once that lead was acted on", async () => {
     const project = await fixture();
     const weak = { ...good, own_need: { type: "noul", noul: 0.1 } };
     const lead = await add(project.id, "legacy winner", { stage: "lead", status: "new", author: "dup", conversationId: "c1", signals: weak, ageDays: 0 });
     const merged = await add(project.id, "merged sibling", { stage: "merged", level: "complete", author: "dup", conversationId: "c1", ageDays: 2 });
     let feed = await listXOpportunities(project.id, { days: 7, status: "new" });
-    expect(feed.items.map((x) => xOpportunityCard(x.entry).tweetId)).toEqual([merged]);
-    expect(feed.items[0].entry.kind).toBe("held");
+    // The author's lead keeps their card, though the merged sibling scores higher.
+    expect(feed.items.map((x) => xOpportunityCard(x.entry).tweetId)).toEqual([lead]);
     expect(feed.total).toBe(1);
     const [evaluation] = await db().select().from(xEvaluations).where(and(eq(xEvaluations.projectId, project.id), eq(xEvaluations.tweetId, merged)));
     expect((await xEvaluationEntry(project.id, evaluation.id))?.kind).toBe("held");

@@ -19,7 +19,7 @@ export const X_REPLY_VERSION = "x-reply-2026-09-28.1";
  */
 export const REPLY_STALE_HOURS = 48;
 /** Bumped whenever the seed-word prompt changes, so every project asks the model again. */
-export const X_SEEDS_VERSION = "x-seeds-2026-09-28.1";
+export const X_SEEDS_VERSION = "x-seeds-2026-10-14.1";
 /**
  * The language every project's X lanes search and its screen keeps, as X's
  * lang codes. It is part of what the lanes and the seed words were made from

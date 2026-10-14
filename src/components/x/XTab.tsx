@@ -9,7 +9,8 @@ import { PeopleStrip } from "@/components/leads/PeopleStrip";
 import { Fleeting } from "@/components/Fleeting";
 import { ScanDone, ScanRunning } from "@/components/leads/ScanBanner";
 import { XFilters } from "@/components/x/XFilters";
-import { XSearches } from "@/components/x/XGroups";
+import { GroupSummary, XSearches } from "@/components/x/XGroups";
+import { XGroupDetails } from "@/components/x/XGroupDetails";
 import { XOpportunityList } from "@/components/x/XOpportunityList";
 import { XLeadDetail, type XSelection } from "@/components/x/XLeadDetail";
 import { config } from "@/lib/config";
@@ -34,6 +35,7 @@ import {
   xStatus,
   type XFeedFilter,
   type XOpportunity,
+  type XOpportunityFeed,
   type XStatus,
   type XStatusFilter,
 } from "@/lib/x/read";
@@ -105,7 +107,7 @@ function listSearch(params: XParams): string {
   return withParams(params, { lead: undefined });
 }
 
-/** Open the requested card, or the strongest opportunity (including uncertain ones). */
+/** Open the requested card, or else New's first lead (History's first card). */
 async function openOn(
   projectId: string,
   opportunities: XOpportunity[],
@@ -128,7 +130,61 @@ async function openOn(
     const moved = await xLeadById(projectId, requested.slice("lead-".length));
     if (moved) return { kind: "lead", lead: moved };
   }
-  return opportunities.find((one) => history || (one.priority !== null && one.priority >= X_PRIORITY_FLOOR))?.entry ?? null;
+  // New opens on its first lead; a post that is not a lead opens only when asked for.
+  return opportunities.find((one) => history || one.entry.kind === "lead")?.entry ?? null;
+}
+
+/**
+ * New, in the order the scan itself counts: people asking, then posts worth a
+ * reply, as Leads with their verdicts. Below them, open, the posts that are not
+ * leads but whose stored evidence clears the floor (Maybe); then, shut, the
+ * rest of what lurk read and left out, best evidence first.
+ */
+function NewList({ feed, params, selectedId, arriving, empty }: {
+  feed: XOpportunityFeed;
+  params: XParams;
+  selectedId: string | null;
+  arriving: boolean;
+  empty: string;
+}) {
+  const leadCount = (feed.leads ?? 0) + (feed.replies ?? 0);
+  const leads = feed.items.slice(0, leadCount);
+  const others = feed.items.slice(leadCount);
+  const maybe = others.filter((item) => item.priority !== null && item.priority >= X_PRIORITY_FLOOR);
+  const rest = others.filter((item) => !maybe.includes(item));
+  const restTotal = feed.total - leadCount - maybe.length;
+  const selected = (items: XOpportunity[]) => items.some((item) => xOpportunityCard(item.entry).entryId === selectedId);
+  return (
+    <>
+      <GroupHeader label="Leads" count={feed.leads ?? 0} note={feed.replies ? `+ ${feed.replies} to reply to` : null} />
+      {leads.length > 0 ? (
+        <XOpportunityList items={leads} params={params} selectedId={selectedId} />
+      ) : arriving && others.length === 0 ? (
+        <ArrivingLeads />
+      ) : (
+        <p className="text-small p-3 text-fg-muted">
+          {others.length === 0 ? empty : `Nobody on X asked for what you do or posted anything worth a reply in this window. ${maybe.length > 0 ? "The posts under Maybe below could still be worth a look." : "What lurk read and left out is under Left out below."}`}
+        </p>
+      )}
+      {maybe.length > 0 ? (
+        <XGroupDetails selected={selected(maybe)}>
+          <GroupSummary label="Maybe" count={maybe.length} warm />
+          <p className="text-small border-y px-3 py-2 text-fg-muted">Not leads, but lurk isn&apos;t sure. Worth a quick look.</p>
+          <XOpportunityList items={maybe} params={params} selectedId={selectedId} ranked />
+        </XGroupDetails>
+      ) : null}
+      {rest.length > 0 ? (
+        <XGroupDetails selected={selected(rest)} initiallyOpen={false}>
+          <GroupSummary label="Left out" count={restTotal} />
+          <p className="text-small border-y px-3 py-2 text-fg-muted">Posts lurk read and did not count as leads, closest first.</p>
+          <XOpportunityList items={rest} params={params} selectedId={selectedId} ranked />
+          {restTotal > rest.length ? (
+            <p className="text-small border-t p-3 text-fg-muted">The closest {rest.length} of {restTotal} are listed. Narrow the date window to see more.</p>
+          ) : null}
+        </XGroupDetails>
+      ) : null}
+    </>
+  );
 }
 
 /** A group's name and count, stuck to the top of the list column while its rows scroll under it. */
@@ -147,7 +203,7 @@ function ArrivingLeads() {
   return (
     <div className="flex flex-col">
       <p className="text-small border-b p-3 text-fg-muted">
-        lurk is searching X and checking posts against your product. Matches are ranked as evidence arrives.
+        lurk is searching X and checking posts against your product. Leads appear here as they are found.
       </p>
       <ListSkeleton rows={4} bare fade={0.2} />
     </div>
@@ -266,7 +322,6 @@ export async function XTab({ userId, project, params }: { userId: string; projec
         </div>
 
         <PeopleStrip
-          noun={filter.status === "new" ? "match" : "lead"}
           faces={opportunities.faces}
           days={filter.days}
           at={filter.at}
@@ -280,19 +335,18 @@ export async function XTab({ userId, project, params }: { userId: string; projec
             backHref={`?${listSearch(params)}`}
             list={
               <>
-                <GroupHeader label={filter.status === "new" ? "Opportunities" : "Leads"} count={opportunities.total} />
-                {opportunities.items.length === 0 && firstCheck && (status.running || !status.lastFailure) && filter.status === "new" ? (
-                  <ArrivingLeads />
-                ) : opportunities.items.length === 0 ? (
-                  <p className="text-small p-3 text-fg-muted">
-                    {emptySentence(filter, status, lanes.length, activeLanes.length, project.name, !allowance.spent)}
-                  </p>
+                {filter.status === "new" ? (
+                  <NewList feed={opportunities} params={params} selectedId={selectedId} arriving={firstCheck && (Boolean(status.running) || !status.lastFailure)} empty={emptySentence(filter, status, lanes.length, activeLanes.length, project.name, !allowance.spent)} />
                 ) : (
                   <>
-                    {filter.status === "new" && !opportunities.items.some((item) => item.priority !== null && item.priority >= X_PRIORITY_FLOOR) ? (
-                      <p className="text-small p-3 text-fg-muted">No high-priority matches yet. Lower-priority posts are still available below.</p>
-                    ) : null}
-                    <XOpportunityList items={opportunities.items} params={params} selectedId={selectedId} showDivider={filter.status === "new"} />
+                    <GroupHeader label="Leads" count={opportunities.total} />
+                    {opportunities.items.length === 0 ? (
+                      <p className="text-small p-3 text-fg-muted">
+                        {emptySentence(filter, status, lanes.length, activeLanes.length, project.name, !allowance.spent)}
+                      </p>
+                    ) : (
+                      <XOpportunityList items={opportunities.items} params={params} selectedId={selectedId} />
+                    )}
                     {opportunities.total > opportunities.items.length ? (
                       <p className="text-small p-3 text-fg-muted">The top {opportunities.items.length} of {opportunities.total} authors are listed. Narrow the date window to see more.</p>
                     ) : null}

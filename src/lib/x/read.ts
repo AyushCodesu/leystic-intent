@@ -431,10 +431,19 @@ export type XEvaluationEntry =
 
 export type XOpportunity = { entry: XEvaluationEntry; priority: number | null; checks: string[]; notes?: string[] };
 /**
- * `items` is the top of the ranked stream; `faces` is every card of it, so the
- * date strip counts and offers every day, not only the days the cap kept.
+ * `items` is the top of the ranked stream, leads first. `faces` covers the
+ * whole window, not only the cards the cap kept: in New every ask, as the
+ * scan's own line counts them, and in History every card.
  */
-export type XOpportunityFeed = { items: XOpportunity[]; total: number; posts: number; faces: LeadFace[] };
+export type XOpportunityFeed = {
+  items: XOpportunity[];
+  total: number;
+  posts: number;
+  /** New only: asks and posts worth a reply among `total`, which come first in `items`. */
+  leads?: number;
+  replies?: number;
+  faces: LeadFace[];
+};
 
 /** The most cards New lists; the strip and the count still cover the whole ranked window. */
 const OPPORTUNITY_LIST_LIMIT = 200;
@@ -557,7 +566,7 @@ export async function listXOpportunities(
       .select({
         evaluationId: xEvaluations.id, stage: xEvaluations.stage, level: xEvaluations.level, signals: xEvaluations.signals,
         reasonCode: xEvaluations.reasonCode, engagement: xEvaluations.engagement,
-        tweetId: xPosts.id, author: xPosts.authorUsername, authorImage: xPosts.authorImage, postedAt: xPosts.createdAt, leadId: xLeads.id,
+        tweetId: xPosts.id, author: xPosts.authorUsername, authorImage: xPosts.authorImage, postedAt: xPosts.createdAt, leadId: xLeads.id, leadKind: xLeads.kind,
       })
       .from(xEvaluations)
       .innerJoin(xPosts, eq(xPosts.id, xEvaluations.tweetId))
@@ -573,10 +582,20 @@ export async function listXOpportunities(
         // Answered conversations must not reappear through unqualified sibling posts.
         sql`not exists ${handledSql}`,
       ));
-    const ranked = rankXOpportunities(pool.map((row) => ({
+    const inputs = pool.map((row) => ({
       ...row, key: row.tweetId, entryId: row.leadId ? `lead-${row.leadId}` : `${HELD_STAGES.includes(row.stage) ? "held" : "filtered"}-${row.evaluationId}`,
       replyVerdictCode: row.reasonCode,
-    })));
+    }));
+    // Leads come first, asks then posts worth a reply, each in evidence order.
+    // An author with a lead keeps it: their other posts do not take its card.
+    const leads = rankXOpportunities(inputs.filter((one) => one.leadId !== null));
+    const asks = leads.filter((one) => one.leadKind === "ask");
+    const leadAuthors = new Set(leads.map((one) => one.author.trim().toLowerCase()));
+    const ranked = [
+      ...asks,
+      ...leads.filter((one) => one.leadKind !== "ask"),
+      ...rankXOpportunities(inputs.filter((one) => one.leadId === null && !leadAuthors.has(one.author.trim().toLowerCase()))),
+    ];
     const top = ranked.slice(0, OPPORTUNITY_LIST_LIMIT);
     const rows = top.length === 0 ? [] : await tx
       .select({ evaluation: xEvaluations, post: xPosts, author: xAuthors, lead: xLeads, closeCall: closeCallSql, worth: worthSql })
@@ -602,7 +621,10 @@ export async function listXOpportunities(
       items,
       total: ranked.length,
       posts: pool.length,
-      faces: ranked.map((one) => opportunityFace(one.entryId, one.postedAt, one.priority, one.author, one.authorImage)),
+      leads: asks.length,
+      replies: leads.length - asks.length,
+      // The strip shows who is asking, as the rail and the scan's own line count them.
+      faces: asks.map((one) => opportunityFace(one.entryId, one.postedAt, one.priority, one.author, one.authorImage)),
     };
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }

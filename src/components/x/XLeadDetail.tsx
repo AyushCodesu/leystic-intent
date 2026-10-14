@@ -243,7 +243,7 @@ export function XLeadDetail({
   return (
     <Pane>
       <header className="flex flex-col gap-2 border-b p-4">
-        <Title text={lead.headline} badge={opportunity ? <XOpportunityBadge opportunity={{ entry: selection, ...opportunity }} /> : reply ? <XReplyChip moment={lead.moment} /> : <VerdictBadge fit={lead.fit} intent={lead.intent} />} />
+        <Title text={lead.headline} badge={reply ? <XReplyChip moment={lead.moment} /> : <VerdictBadge fit={lead.fit} intent={lead.intent} />} />
         <div className="flex flex-wrap items-center gap-2">
           <AuthorAvatar name={lead.authorName ?? lead.authorUsername} src={lead.authorImage} size={24} platform="x" />
           <span className="text-small text-fg-muted">@{lead.authorUsername}</span>
