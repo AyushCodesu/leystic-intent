@@ -4,8 +4,22 @@ import { productState, type ProductFacts } from "@/lib/product";
 import { SWEEP_SEARCHES_SYSTEM } from "@/lib/prompts";
 import { askedText } from "@/lib/discovery/rank";
 
-/** Ordered by how many leads a search of each kind found per 100 posts in the 2026-09-19 experiment. */
-export const KINDS = ["tool_ask", "alternative_to", "symptom", "acting_for", "workaround", "moment"] as const;
+/**
+ * The first six ordered by how many leads a search of each kind found per 100
+ * posts in the 2026-09-19 experiment; the rival questions, measured in another
+ * (2026-10-13), come after so a widened project still gets tool asks and rivals.
+ */
+export const KINDS = [
+  "tool_ask",
+  "alternative_to",
+  "symptom",
+  "acting_for",
+  "workaround",
+  "moment",
+  "rival_vs",
+  "rival_worth_it",
+  "rival_anyone_use",
+] as const;
 
 export type SweepSearch = { kind: (typeof KINDS)[number]; text: string };
 
@@ -14,7 +28,7 @@ const schema = z.object({
 });
 
 /** The most searches one sweep adds, whatever the model returns. */
-const MOST = 20;
+const MOST = 22;
 
 /**
  * The searches a first sweep adds to the page's own phrasings: one model call,
