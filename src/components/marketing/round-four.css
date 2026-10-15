@@ -525,6 +525,16 @@
     display: none;
   }
 }
+/* The X launch video, at the width of the tile row under it. */
+.x-video {
+  display: block;
+  width: calc(100% - 48px);
+  margin: 0 24px 40px;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius-card);
+  background: var(--m-wash);
+  box-shadow: var(--m-fragment-shadow);
+}
 /* X leads: saved posts drawn as X draws them, stacked in each tile. */
 /* Tiles grow to fit both posts whole; the row keeps them one height. */
 .x-tiles .three-up {

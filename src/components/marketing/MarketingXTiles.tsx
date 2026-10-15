@@ -119,6 +119,16 @@ export function MarketingXTiles() {
           reply.
         </p>
       </header>
+      {/* The X launch video. It has sound, so it waits for a play click instead of autoplaying muted. */}
+      <video
+        className="x-video"
+        src="/videos/x-leads.mp4"
+        poster="/videos/x-leads-poster.jpg"
+        controls
+        playsInline
+        preload="metadata"
+        aria-label="lurk finding X posts that ask for a product like yours"
+      />
       <div className="three-up">
         {TILES.map((tile) => (
           <figure className="pastel-tile" key={tile.title}>
