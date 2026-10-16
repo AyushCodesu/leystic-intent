@@ -9,6 +9,9 @@
   --fg-muted: oklch(0.5 0 0);
   --primary: var(--fg);
   --primary-fg: oklch(1 0 0);
+  --brand: #577bf4;
+  --brand-hover: #496ce7;
+  --brand-soft: #eef2ff;
   --score-hot: oklch(0.62 0.17 145);
   --score-warm: oklch(0.75 0.15 75);
   --score-cool: var(--fg-muted);

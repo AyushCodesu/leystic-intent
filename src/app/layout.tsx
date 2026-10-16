@@ -5,13 +5,13 @@ import "@fontsource-variable/jetbrains-mono";
 import "./globals.css";
 import { PostHogIdentify } from "@/components/PostHogIdentify";
 import { ThemeScript } from "@/components/ThemeScript";
-import { PRODUCT_NAME_WITH_PROVIDER, PRODUCT_URL } from "@/lib/brand";
+import { PRODUCT_NAME, PRODUCT_NAME_WITH_PROVIDER, PRODUCT_URL } from "@/lib/brand";
 
-const DESCRIPTION = "Monitor Reddit and X to find customers, get cited by AI, and rank on Google.";
+const DESCRIPTION = "Find people already asking for what you sell. Leystic finds public conversations where potential customers are asking for tools, exploring alternatives or describing problems your product solves.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(PRODUCT_URL),
-  title: PRODUCT_NAME_WITH_PROVIDER,
+  title: `${PRODUCT_NAME} - Find people already asking for what you sell`,
   description: DESCRIPTION,
   openGraph: {
     title: PRODUCT_NAME_WITH_PROVIDER,

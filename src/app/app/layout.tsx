@@ -19,35 +19,13 @@ type RailCounts = { newLeads: number; rankingThreads: number; mentions: number; 
 
 const groupsFor = (counts: RailCounts): RailGroup[] => [
   {
-    label: "Engage",
+    label: "Overview",
     items: [
       { href: "/app/leads", label: "Leads", icon: "radar", count: counts.newLeads },
-      ...(counts.newXLeads === null
-        ? []
-        : [{ href: "/app/x", label: "X leads", icon: "x" as const, count: counts.newXLeads }]),
-      { href: "/app/seo", label: "Reddit SEO", icon: "search", count: counts.rankingThreads },
-    ],
-  },
-  {
-    label: "Research",
-    items: [
-      { href: "/app/insights", label: "Insights", icon: "lightbulb" },
-      { href: "/app/competitors", label: "Competitors", icon: "swords", count: counts.mentions },
-    ],
-  },
-  {
-    label: "Setup",
-    items: [
       { href: "/app/product", label: "Product", icon: "box" },
-      { href: "/app/sources", label: "Sources", icon: "telescope" },
-      { href: "/app/filters", label: "Filters", icon: "filters" },
-      {
-        href: "/app/settings/alerts",
-        label: "Alerts",
-        icon: "bell",
-        marks: ["email", "slack", "discord"],
-      },
-      { href: "/app/usage", label: "Data usage", icon: "receipt" },
+      { href: "/app/competitors", label: "Competitors", icon: "swords", count: counts.mentions },
+      { href: "/app/insights", label: "Insights", icon: "lightbulb" },
+      { href: "/app/usage", label: "Usage", icon: "receipt" },
       { href: "/app/settings", label: "Settings", icon: "settings" },
     ],
   },

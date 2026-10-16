@@ -271,6 +271,12 @@ export const leads = pgTable(
     status: text("status").notNull().default("new"),
     notFitReason: text("not_fit_reason"),
     /**
+     * User-confirmed business outcome: 'replied' | 'meeting_booked' | 'opportunity' | 'customer' | 'not_fit'.
+     */
+    outcome: text("outcome"),
+    outcomeRecordedAt: timestamp("outcome_recorded_at", { withTimezone: true }),
+    outcomeNotes: text("outcome_notes"),
+    /**
      * The reply count this project last read the post's thread at. The shared
      * `reddit_posts.comments_read_count` says when the thread was last bought;
      * this says when this project last judged it, which one project's purchase

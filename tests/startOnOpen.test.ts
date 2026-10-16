@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import * as schema from "@/db/schema";
-import { makePost, makeProject, makeUser } from "./fixtures/db";
+import { describeDb, makePost, makeProject, makeUser } from "./fixtures/db";
 
 let signedIn: { id: string } = { id: "" };
 const kickScheduler = vi.fn();
@@ -15,7 +15,7 @@ vi.mock("@/jobs/scheduler", () => ({ kickScheduler }));
  * first opened. What has to hold: the first open queues one job, a second open
  * queues nothing, and nobody starts a job on a project that is not theirs.
  */
-describe("startOnOpen against a database", () => {
+describeDb("startOnOpen against a database", () => {
   async function owned() {
     const user = await makeUser({ clerkUserId: `user_${randomUUID()}`, email: `${randomUUID()}@example.com` });
     const project = await makeProject(user.id);

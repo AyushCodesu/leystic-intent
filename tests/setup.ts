@@ -14,9 +14,14 @@ if (existsSync(".env")) {
   process.loadEnvFile(".env");
 }
 const url = testDatabaseUrl(process.env);
+const hasRealDb = Boolean(url);
 if (url) {
   process.env.DATABASE_URL = url;
+} else {
+  // Config requires DATABASE_URL to parse. Provide a test placeholder when no DB is configured.
+  process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/mock_test_db";
 }
+process.env.TEST_DB_AVAILABLE = hasRealDb ? "true" : "false";
 for (const key of PAID_KEYS) {
   delete process.env[key];
 }

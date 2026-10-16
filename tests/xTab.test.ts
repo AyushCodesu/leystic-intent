@@ -21,7 +21,7 @@ describe("the X leads switch", () => {
     expect(xEnabledFor(user)).toBe(expected);
   });
 
-  it.skipIf(!process.env.DATABASE_URL)("keeps X's limits out of /api/v1/me unless X is on for the caller", async () => {
+  it.skipIf(process.env.TEST_DB_AVAILABLE !== "true")("keeps X's limits out of /api/v1/me unless X is on for the caller", async () => {
     const { me } = await import("@/lib/api/handlers");
     const { TIERS } = await import("@/lib/tiers");
     const caller = {

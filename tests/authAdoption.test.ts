@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { users } from "@/db/schema";
+import { describeDb } from "./fixtures/db";
 
 /**
  * Moving Clerk instances gives every person a new Clerk id. Their verified
@@ -16,7 +17,7 @@ const { localUserFor } = await import("@/lib/auth");
 
 const address = () => `${randomUUID()}@adoption.test`;
 
-describe("localUserFor", () => {
+describeDb("localUserFor", () => {
   it("hands the existing row to a new Clerk id with the same verified email", async () => {
     const email = address();
     const before = await localUserFor({ clerkUserId: `old_${randomUUID()}`, email, emailVerified: true });

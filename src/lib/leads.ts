@@ -45,6 +45,9 @@ const feedColumns = {
   matchedPhrase: leads.matchedPhrase,
   status: leads.status,
   kind: leads.kind,
+  outcome: leads.outcome,
+  outcomeRecordedAt: leads.outcomeRecordedAt,
+  outcomeNotes: leads.outcomeNotes,
   postId: leads.postId,
   title: redditPosts.title,
   subreddit: redditPosts.subreddit,
@@ -512,6 +515,27 @@ export async function setLeadStatus(
   await db()
     .update(leads)
     .set({ status, notFitReason })
+    .where(and(eq(leads.id, leadId), eq(leads.projectId, projectId)));
+  forgetProjectFeed(projectId);
+}
+
+/**
+ * Records a user-confirmed business outcome for a lead:
+ * 'replied' | 'meeting_booked' | 'opportunity' | 'customer' | 'not_fit'.
+ */
+export async function recordLeadOutcome(
+  projectId: string,
+  leadId: string,
+  outcome: string,
+  outcomeNotes: string | null = null,
+): Promise<void> {
+  await db()
+    .update(leads)
+    .set({
+      outcome,
+      outcomeRecordedAt: new Date(),
+      outcomeNotes,
+    })
     .where(and(eq(leads.id, leadId), eq(leads.projectId, projectId)));
   forgetProjectFeed(projectId);
 }

@@ -12,6 +12,27 @@ import type { FeedLead } from "@/lib/leads";
 export type LeadStatus = "new" | "replied" | "hidden" | "not_fit" | "resolved";
 
 /**
+ * User-confirmed sales outcomes tracked on a lead.
+ */
+export const LEAD_OUTCOMES = [
+  "replied",
+  "meeting_booked",
+  "opportunity",
+  "customer",
+  "not_fit",
+] as const;
+
+export type LeadOutcome = (typeof LEAD_OUTCOMES)[number];
+
+export const OUTCOME_LABELS: Record<LeadOutcome, string> = {
+  replied: "Replied",
+  meeting_booked: "Meeting booked",
+  opportunity: "Opportunity",
+  customer: "Customer",
+  not_fit: "Not a fit",
+};
+
+/**
  * The date pills over the feed. Days, plus `all`: the first scan reaches back
  * a year, so the recent window that opens the feed is not everything there is.
  */
@@ -196,6 +217,9 @@ export type CardLead = {
   kind: string;
   /** Where the user put it: new, replied, hidden, not_fit, or resolved by the scan. */
   status: string;
+  outcome?: string | null;
+  outcomeRecordedAt?: Date | null;
+  outcomeNotes?: string | null;
   reason: string | null;
   matchedPhrase: string | null;
   title: string;
@@ -234,6 +258,9 @@ export function toCard(lead: FeedLead): CardLead {
     engagement: lead.engagement,
     kind: lead.kind,
     status: lead.status,
+    outcome: (lead as Record<string, unknown>).outcome as string | null | undefined,
+    outcomeRecordedAt: (lead as Record<string, unknown>).outcomeRecordedAt as Date | null | undefined,
+    outcomeNotes: (lead as Record<string, unknown>).outcomeNotes as string | null | undefined,
     reason: lead.reason,
     matchedPhrase: lead.matchedPhrase,
     title: lead.title,

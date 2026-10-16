@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { db } from "@/db";
 import * as schema from "@/db/schema";
-import { makeProject, makeUser } from "./fixtures/db";
+import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -14,7 +14,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * link then did not show. It now groups what the feed shows on its New and
  * Hidden tabs, and a card counts what its link opens.
  */
-describe("the leads Insights groups and counts", () => {
+describeDb("the leads Insights groups and counts", () => {
   async function fixture() {
     const user = await makeUser({ clerkUserId: `user_${randomUUID()}` });
     const project = await makeProject(user.id, { leadFilters: { mustMention: ["form"] } });

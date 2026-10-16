@@ -7,6 +7,8 @@ import { Select } from "@/components/ui/select";
 import { errorFrom } from "@/lib/actionError";
 import type { ActionResult } from "@/lib/actionResult";
 
+import { LEAD_OUTCOMES, OUTCOME_LABELS, type LeadOutcome } from "@/lib/feed";
+
 /** Why a lead someone was asking in was a miss, unless the pane offers its own list. */
 const NOT_FIT_REASONS = [
   "wrong audience",
@@ -24,6 +26,8 @@ export type LeadActionHandlers = {
   hide?: () => Promise<void>;
   /** Comes back with a sentence when it refused, which shows under the picker. Absent as hide is. */
   notFit?: (formData: FormData) => Promise<ActionResult>;
+  /** Records user-confirmed outcome (e.g. meeting booked, customer). */
+  recordOutcome?: (formData: FormData) => Promise<ActionResult>;
   /** Mutes where the lead was found, with the button's words ("Mute r/saas"). */
   mute?: { label: string; action: () => Promise<void> };
 };
@@ -36,6 +40,8 @@ type LeadActionsProps = {
   actions: LeadActionHandlers | null;
   /** The thread is already marked replied, so the button takes that back instead. */
   replied?: boolean;
+  outcome?: string | null;
+  outcomeNotes?: string | null;
   reasons?: string[];
 };
 
@@ -46,13 +52,38 @@ type LeadActionsProps = {
  * whole thread (a Reddit post, an X conversation), and mute the whole
  * community, in the feed and every alert channel alike.
  */
-export function LeadActions({ openLabel, url, actions, replied = false, reasons = NOT_FIT_REASONS }: LeadActionsProps) {
+export function LeadActions({
+  openLabel,
+  url,
+  actions,
+  replied = false,
+  outcome = null,
+  outcomeNotes = null,
+  reasons = NOT_FIT_REASONS,
+}: LeadActionsProps) {
   const [picking, setPicking] = useState(false);
+  const [outcomePicking, setOutcomePicking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const iconClass = "size-3.5 text-fg-muted";
 
   return (
     <div className="flex shrink-0 flex-col gap-3 border-t p-4">
+      {outcome ? (
+        <div className="flex flex-wrap items-center gap-2 text-small">
+          <span className="text-fg-muted">Confirmed outcome:</span>
+          <span className="rounded-control bg-[#577BF4]/15 px-2 py-0.5 font-medium text-[#577BF4]">
+            {OUTCOME_LABELS[outcome as LeadOutcome] ?? outcome}
+          </span>
+          {outcomeNotes ? <span className="text-fg-muted italic">- {outcomeNotes}</span> : null}
+          <button
+            type="button"
+            onClick={() => setOutcomePicking((v) => !v)}
+            className="ml-1 text-small text-fg-muted underline hover:text-fg"
+          >
+            {outcomePicking ? "Close" : "Change"}
+          </button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <Button
           size="lg"
@@ -81,6 +112,42 @@ export function LeadActions({ openLabel, url, actions, replied = false, reasons 
                 </Button>
               </form>
             )}
+            {actions.recordOutcome ? (
+              outcomePicking ? (
+                <form
+                  action={async (formData) => {
+                    const res = await errorFrom(() => actions.recordOutcome!(formData));
+                    setError(res);
+                    if (!res) setOutcomePicking(false);
+                  }}
+                  className="flex flex-wrap items-center gap-1.5"
+                >
+                  <Select
+                    name="outcome"
+                    required
+                    ariaLabel="Record confirmed outcome"
+                    placeholder="Select outcome"
+                    className="h-7"
+                    defaultValue={outcome ?? undefined}
+                    options={LEAD_OUTCOMES.map((k) => ({ value: k, label: OUTCOME_LABELS[k] }))}
+                  />
+                  <input
+                    type="text"
+                    name="notes"
+                    placeholder="Outcome note"
+                    className="h-7 rounded-control border bg-surface px-2 text-small text-fg"
+                    defaultValue={outcomeNotes ?? ""}
+                  />
+                  <Button type="submit" variant="outline" size="sm">
+                    Record
+                  </Button>
+                </form>
+              ) : !outcome ? (
+                <Button variant="ghost" size="sm" onClick={() => setOutcomePicking(true)}>
+                  Outcome
+                </Button>
+              ) : null
+            ) : null}
             {actions.hide ? (
               <form action={actions.hide}>
                 <Button type="submit" variant="ghost" size="sm">

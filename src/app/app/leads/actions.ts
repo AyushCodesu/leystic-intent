@@ -5,7 +5,7 @@ import { failure, type ActionResult } from "@/lib/actionResult";
 import { dismissAlertsOffer, turnOnDiscordAlerts, turnOnEmailAlerts } from "@/lib/alerts/offer";
 import { FEED_PAGE_SIZE, feedFilter, toRow, type FeedRow } from "@/lib/feed";
 import { markThreadReplied, redditLeadThread, reopenThread } from "@/lib/handled";
-import { leadInSubreddit, listLeads, setLeadStatus } from "@/lib/leads";
+import { leadInSubreddit, listLeads, recordLeadOutcome, setLeadStatus } from "@/lib/leads";
 import { addMute } from "@/lib/mutes";
 import { promoPolicyFor } from "@/lib/reddit/skus";
 import { requireOwnedProject } from "@/lib/owned";
@@ -27,6 +27,7 @@ export async function repliedLeadAction(projectId: string, leadId: string) {
   const thread = await redditLeadThread(projectId, leadId);
   if (thread) {
     await markThreadReplied(projectId, "reddit", thread);
+    await recordLeadOutcome(projectId, leadId, "replied", null);
   }
   revalidatePath("/app", "layout");
 }
@@ -56,6 +57,24 @@ export async function markNotFitAction(projectId: string, leadId: string, formDa
     return { error: "Pick a reason before marking a lead as not a fit" };
   }
   await setLeadStatus(projectId, leadId, "not_fit", reason);
+  await recordLeadOutcome(projectId, leadId, "not_fit", reason);
+  revalidatePath("/app", "layout");
+  return { error: null };
+}
+
+/** Records a user-confirmed outcome for this lead (meeting booked, opportunity, customer, etc.). */
+export async function recordLeadOutcomeAction(
+  projectId: string,
+  leadId: string,
+  formData: FormData,
+): Promise<ActionResult> {
+  await requireOwnedProject(projectId);
+  const outcome = String(formData.get("outcome") ?? "").trim();
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (!outcome) {
+    return { error: "Pick an outcome to record" };
+  }
+  await recordLeadOutcome(projectId, leadId, outcome, notes);
   revalidatePath("/app", "layout");
   return { error: null };
 }

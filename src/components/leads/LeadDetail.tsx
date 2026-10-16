@@ -2,6 +2,7 @@ import {
   hideLeadAction,
   markNotFitAction,
   muteSubredditAction,
+  recordLeadOutcomeAction,
   reopenLeadAction,
   repliedLeadAction,
 } from "@/app/app/leads/actions";
@@ -168,11 +169,14 @@ export function LeadDetail({ selection, projectId, competitors, scoring }: LeadD
         openLabel="Open on Reddit"
         url={lead.url}
         replied={lead.status === "replied"}
+        outcome={lead.outcome}
+        outcomeNotes={lead.outcomeNotes}
         actions={{
           replied: repliedLeadAction.bind(null, projectId, lead.id),
           reopen: reopenLeadAction.bind(null, projectId, lead.id),
           hide: hideLeadAction.bind(null, projectId, lead.id),
           notFit: markNotFitAction.bind(null, projectId, lead.id),
+          recordOutcome: recordLeadOutcomeAction.bind(null, projectId, lead.id),
           mute: { label: `Mute r/${lead.subreddit}`, action: muteSubredditAction.bind(null, projectId, lead.subreddit) },
         }}
       />

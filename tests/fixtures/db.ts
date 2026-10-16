@@ -10,7 +10,7 @@ import { projects, redditPosts, users } from "@/db/schema";
  */
 
 /** describe for tests that need the database, skipped on a machine without one. */
-export const describeDb = describe.skipIf(!process.env.DATABASE_URL);
+export const describeDb = describe.skipIf(process.env.TEST_DB_AVAILABLE !== "true");
 
 /** A user nobody signs in as. The test_ prefix marks the row as a fixture. */
 export async function makeUser(values: Partial<typeof users.$inferInsert> = {}) {

@@ -12,7 +12,6 @@ import { MarketingDecisionTiles } from "@/components/marketing/MarketingDecision
 import { MarketingAnyapi } from "@/components/marketing/MarketingAnyapi";
 import { MotionPanel } from "@/components/marketing/MotionPanel";
 import { CtaRow } from "@/components/marketing/CtaRow";
-import { BrandStack, BrandWord } from "@/components/marketing/BrandWord";
 import { REPO_URL } from "@/lib/brand";
 import "@/components/marketing/marketing.css";
 import "@/components/marketing/below-fold.css";
@@ -28,16 +27,14 @@ export default function MarketingPage() {
         <MarketingNav />
         <section className="hero-layout" aria-labelledby="marketing-title">
           <div className="hero-copy">
-            <h1 id="marketing-title">
-              <span className="hero-line">
-                Monitor <BrandWord name="Reddit" /> and <BrandWord name="X" /> to find customers,
-              </span>{" "}
-              <span className="hero-line">
-                get cited by <BrandStack /> AI, and rank on <BrandWord name="Google" />.
-              </span>
+            <h1 id="marketing-title" className="tracking-tight">
+              Find people already asking for what you sell.
             </h1>
-            <p className="hero-description hero-open">
-              Free.{" "}
+            <p className="hero-description text-fg-muted" style={{ maxWidth: "620px", marginTop: "1rem" }}>
+              Leystic finds public conversations where potential customers are asking for tools, exploring alternatives or describing problems your product solves. See the exact post, why it matches, and what to do next.
+            </p>
+            <p className="hero-description hero-open" style={{ marginTop: "0.5rem" }}>
+              Free to start.{" "}
               <a href={REPO_URL} target="_blank" rel="noopener">
                 Open source
                 <ArrowUpRight aria-hidden="true" />
@@ -47,11 +44,15 @@ export default function MarketingPage() {
             <div className="hero-promises">
               <span>
                 <Check />
-                Free, no card
+                Human-controlled
               </span>
               <span>
                 <Check />
-                Never posts or DMs
+                Never auto-posts or DMs
+              </span>
+              <span>
+                <Check />
+                Explainable evidence
               </span>
             </div>
           </div>
