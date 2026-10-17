@@ -31,6 +31,9 @@ export const competitorMentions = pgTable(
     summary: text("summary"),
     /** The sentence of the post or reply that named the competitor. */
     quote: text("quote"),
+    reasonCategory: text("reason_category"),
+    switchingEvidence: text("switching_evidence"),
+    explanation: text("explanation"),
     foundAt: timestamp("found_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

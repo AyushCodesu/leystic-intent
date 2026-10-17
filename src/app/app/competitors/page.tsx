@@ -1,5 +1,9 @@
 import { openCompetitorsAction, scanCompetitorsAction } from "@/app/app/jobs";
 import { StartOnOpen } from "@/components/StartOnOpen";
+import { CompetitorDislikeView } from "@/components/competitors/CompetitorDislikeView";
+import { CompetitorLoveView } from "@/components/competitors/CompetitorLoveView";
+import { CompetitorSwitchersView } from "@/components/competitors/CompetitorSwitchersView";
+import { CompetitorTabs, type CompetitorTab } from "@/components/competitors/CompetitorTabs";
 import { MentionCard } from "@/components/competitors/MentionCard";
 import { MentionsBar } from "@/components/competitors/MentionsBar";
 import { TopCompetitors } from "@/components/competitors/TopCompetitors";
@@ -11,14 +15,17 @@ import { allowanceFor } from "@/lib/throttle";
 import { PaidButton } from "@/components/PaidButton";
 import {
   domainsByName,
+  groupDislikeReasons,
+  groupLoveReasons,
   listMentions,
+  listPotentialSwitchers,
   mentionSeries,
   topCompetitors,
   watchedCompetitors,
 } from "@/lib/competitors/read";
 import { requireActiveProject } from "@/lib/projects";
 
-type CompetitorsPageProps = { searchParams: Promise<{ project?: string }> };
+type CompetitorsPageProps = { searchParams: Promise<{ project?: string; tab?: string }> };
 
 /** The competitor scan's status line. */
 const SCAN_WORDS: JobWords = {
@@ -35,6 +42,15 @@ export default async function CompetitorsPage({ searchParams }: CompetitorsPageP
   const params = await searchParams;
   const project = await requireActiveProject(user.id, params.project);
 
+  const tab: CompetitorTab =
+    params.tab === "dislike"
+      ? "dislike"
+      : params.tab === "switchers"
+        ? "switchers"
+        : params.tab === "mentions"
+          ? "mentions"
+          : "love";
+
   const [competitors, mentions, last, next, allowance] = await Promise.all([
     watchedCompetitors(project.id),
     listMentions(project.id),
@@ -45,6 +61,17 @@ export default async function CompetitorsPage({ searchParams }: CompetitorsPageP
   const names = competitors.map((row) => row.name);
   const domains = domainsByName(competitors);
   const ranked = topCompetitors(mentions);
+
+  const loveReasons = groupLoveReasons(mentions);
+  const dislikeReasons = groupDislikeReasons(mentions);
+  const switchers = listPotentialSwitchers(mentions);
+
+  const counts = {
+    love: loveReasons.length,
+    dislike: dislikeReasons.length,
+    switchers: switchers.length,
+    mentions: mentions.length,
+  };
 
   // Keyed so switching projects mounts StartOnOpen again for the new one.
   return (
@@ -71,7 +98,16 @@ export default async function CompetitorsPage({ searchParams }: CompetitorsPageP
         <>
           {ranked.length > 0 ? <TopCompetitors rows={ranked} domains={domains} /> : null}
           <MentionsBar series={mentionSeries(mentions, names)} />
-          {mentions.length === 0 ? (
+
+          <CompetitorTabs active={tab} projectId={project.id} counts={counts} />
+
+          {tab === "love" ? (
+            <CompetitorLoveView groups={loveReasons} domains={domains} />
+          ) : tab === "dislike" ? (
+            <CompetitorDislikeView groups={dislikeReasons} domains={domains} />
+          ) : tab === "switchers" ? (
+            <CompetitorSwitchersView switchers={switchers} domains={domains} />
+          ) : mentions.length === 0 ? (
             <EmptyState
               title="No mentions yet"
               sentence="Nothing on Reddit named these products in the last 30 days, or no scan has run."

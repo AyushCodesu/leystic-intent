@@ -5,6 +5,8 @@ import { relativeAge } from "@/lib/format";
 import type { MentionView } from "@/lib/competitors/read";
 import { cn } from "@/lib/utils";
 
+import { REASON_CATEGORY_LABELS, SWITCHING_EVIDENCE_LABELS } from "@/lib/competitors/classify";
+
 type MentionCardProps = { mention: MentionView };
 
 /** What a mention with no sentiment is: named in a thread this project already reads. */
@@ -51,8 +53,27 @@ export function MentionCard({ mention }: MentionCardProps) {
           {mention.quote}
         </blockquote>
       ) : null}
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-mono text-fg-muted">about {mention.competitor}</span>
+        {mention.reasonCategory && mention.reasonCategory !== "unknown" ? (
+          <span className="rounded-control bg-surface-2 px-2 py-0.5 text-small text-fg-muted">
+            {REASON_CATEGORY_LABELS[mention.reasonCategory]}
+          </span>
+        ) : null}
+        {mention.switchingEvidence && mention.switchingEvidence !== "no_clear_signal" ? (
+          <span
+            className={cn(
+              "rounded-control px-2 py-0.5 text-small font-medium",
+              mention.switchingEvidence === "actively_switching"
+                ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                : mention.switchingEvidence === "evaluating_alternatives"
+                  ? "bg-blue-500/10 text-blue-600 dark:text-blue-400"
+                  : "bg-surface-2 text-fg-muted",
+            )}
+          >
+            {SWITCHING_EVIDENCE_LABELS[mention.switchingEvidence]}
+          </span>
+        ) : null}
       </div>
     </div>
   );

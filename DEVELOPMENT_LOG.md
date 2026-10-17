@@ -288,3 +288,76 @@ Connect Leystic's public buyer-intent discovery and Learning V1 outcome tracking
   * `npm run build`: successful production build.
   * `git diff --check`: 0 whitespace issues.
   * Typography: verified compliance with `tests/typography.test.ts` (0 unicode em/en-dashes in `src/`).
+
+## [Unreleased] - 2026-10-17: Crawler DNS-Rebinding Closure & Connection Pinning
+
+* **DNS Resolution & SSRF Hardening**:
+  * Upgraded DNS lookup to query all IPv4 and IPv6 addresses via `lookup(hostname, { all: true })`.
+  * Enforced that every returned address must be publicly routable. Rejects any destination when mixed public/private answers or any private addresses are returned.
+  * Expanded `isPrivateIp` checks to comprehensively validate IPv6 multicast (`ff00::/8`), documentation (`2001:db8::/32`), benchmarking (`2001:2::/48`), discard prefix (`100::/64`), and embedded IPv4-mapped IPv6 formats (both dotted decimal and hex-encoded `::ffff:hi:lo`).
+* **Connection Pinning & Rebinding Prevention**:
+  * Introduced `defaultNodeTransport` which passes custom `lookup` directly to `http.request` / `https.request`. The socket connector receives the pre-validated IP address directly, preventing TOCTOU DNS rebinding without performing secondary DNS lookups.
+  * Preserved full TLS SNI (`servername`), TLS peer certificate verification, and HTTP `Host` header behavior.
+  * Reapplied full DNS resolution screening and address pinning on every redirect hop (`maxRedirects = 3`), maintaining strict allowed-host bounds, timeout, and response size capping.
+* **Regression Tests & Verification**:
+  * Expanded `tests/gapsSecurity.test.ts` to 29 tests covering DNS rebinding prevention, mixed public/private answers, IPv4-mapped IPv6 addresses, DNS resolution failures, redirect hops to private destinations, and live HTTP server socket connection pinning.
+  * `npm run check` (`typecheck`, `lint`, and `test`) passed with 0 errors, 0 warnings, and 0 failures.
+  * `npm run build` passed cleanly.
+
+---
+
+## [Unreleased] - 2026-10-17: Competitor Reasons V1 - Evidence, Not Sentiment Alone
+
+### 1. Architectural Scope & Problem Statement
+* Upgraded Leystic's Competitors intelligence workflow from flat positive/neutral/negative sentiment to structured, evidence-backed reason analysis.
+* Directly answers three questions for founders:
+  1. What do users repeatedly love about competitor products?
+  2. What concrete problems or limitations frustrate their users?
+  3. Which public conversations show a genuine opportunity to win a customer who may switch?
+* Strictly enforces evidence boundaries:
+  * A negative comment never automatically counts as switching intent (`dissatisfied_no_switch` vs `actively_switching` / `evaluating_alternatives`).
+  * Complaints and praise are aggregated across independent threads (`postId`) rather than multiple replies inflating counts.
+  * Single observations are explicitly labeled as examples, not recurring patterns (`distinctThreads >= 2`).
+  * Unverified complaints are accompanied by a non-churn disclaimer and never framed as lost revenue or customer churn.
+
+### 2. Structured Classification & Resilient Normalization (`src/lib/competitors/classify.ts`)
+* Extended LLM extraction schema with:
+  * `sentiment`: Preserves `positive`, `neutral`, `negative`.
+  * `reasonCategory`: `pricing_value`, `missing_capability`, `usability`, `reliability`, `performance`, `integrations`, `support`, `recommendation_value_delivered`, `other`, `unknown`.
+  * `switchingEvidence`: `actively_switching`, `evaluating_alternatives`, `dissatisfied_no_switch`, `positive_recommendation`, `no_clear_signal`.
+  * `explanation`: Concise 1-2 sentence explanation strictly grounded in what the author wrote.
+* Implemented resilient Zod preprocess normalization schemas (`reasonCategorySchema`, `switchingEvidenceSchema`) that normalize loose variations (e.g. `pricing/value`, `Expensive subscription cost`, `actively switching`, `frustrated with bug`) to standard enum values while defaulting uncertain inputs to `unknown` and `no_clear_signal`.
+
+### 3. Database Persistence & Backward Compatibility
+* Added migration `drizzle/0042_competitor_reasons.sql` adding nullable columns `reason_category`, `switching_evidence`, and `explanation` to `competitor_mentions`.
+* Updated Drizzle schema `src/db/schema/competitors.ts`.
+* Updated scan write handler `src/lib/competitors/scan.ts` to persist all enriched fields.
+* Maintained full backward compatibility: older mentions with null reason fields are handled safely across queries and UI views.
+* Preserved strict project/tenant isolation: mentions for one project are never returned for another project.
+
+### 4. Distinct-Thread Aggregation & Filtering (`src/lib/competitors/read.ts`)
+* Added pure domain functions:
+  * `groupLoveReasons`: Groups positive praise by competitor and reason category, counting distinct threads (`postId`) and marking recurring patterns (`distinctThreads >= 2`).
+  * `groupDislikeReasons`: Groups concrete complaints by competitor and limitation category, tracking distinct threads and identifying recurring issues vs isolated examples.
+  * `listPotentialSwitchers`: Extracts qualified switcher leads (`actively_switching` or `evaluating_alternatives`), strictly excluding `dissatisfied_no_switch`, and deduplicating multiple replies within a thread to a single switcher card.
+* Updated `listMentions` SQL query to select all new fields and map them to `MentionView`.
+
+### 5. UI Views & Evidence Navigation (`src/app/app/competitors/page.tsx`, `src/components/competitors/`)
+* Created `CompetitorTabs.tsx`: Tab navigation for "What users love", "What users dislike", "Potential switchers", and "All mentions" with live counts.
+* Created `CompetitorLoveView.tsx`: Displays praise reasons with distinct thread counts, recurring badges, and expandable supporting conversations with Reddit links.
+* Created `CompetitorDislikeView.tsx`: Displays concrete limitations with distinct thread counts, example vs recurring badges, supporting evidence quotes, and an explicit context disclaimer.
+* Created `CompetitorSwitchersView.tsx`: Surfaces high-intent replacement discussions, displaying whether the user is actively switching or evaluating alternatives, their concrete frustration, direct quote, and link to the source thread.
+* Updated `MentionCard.tsx`: Displays category and switching evidence badges on individual mentions in the "All mentions" feed.
+
+### 6. Verification & Benchmark Precision
+* **Test Suite**:
+  * `tests/competitors.test.ts`: Expanded to 33 unit tests covering schema normalization, loose string mapping, thread deduplication, recurring vs example labels, switcher filtering, and benchmark precision.
+  * **Curated Benchmark Set**: 10 manually reviewed Reddit posts testing explicit switching signals vs general negative sentiment. Achieved 100% precision (0 false positives for switching among purely dissatisfied users).
+  * `tests/competitorReasonsDb.test.ts`: Database integration test verifying persistence, legacy row null-safety, and cross-project tenant isolation.
+  * `tests/typography.test.ts`: 0 unicode em-dashes or en-dashes across `src/`.
+* **Static & Production Verification**:
+  * `npm run typecheck`: 0 errors.
+  * `npm run lint`: 0 problems (0 errors, 0 warnings).
+  * `npm run test`: 81 passed test files, 757 passed tests, 0 failures.
+  * `npm run build`: Successful Next.js production build (Turbopack).
+  * `git diff --check`: 0 whitespace errors.

@@ -11,7 +11,7 @@ import {
 import { LEAD_AUTHOR, LEAD_AUTHOR_JOIN, LEAD_URL, NEED_AT } from "@/lib/leadSql";
 import { RETRIEVED_STATES } from "@/lib/scan/planStates";
 import { DAY_MS, daysAgo } from "@/lib/time";
-import { SENTIMENTS, type Sentiment } from "./classify";
+import { SENTIMENTS, type ReasonCategory, type Sentiment, type SwitchingEvidence } from "./classify";
 
 /** The window the competitor screen shows, matching the feed window. */
 export const MENTION_WINDOW_DAYS = 30;
@@ -24,6 +24,9 @@ export type MentionView = {
   summary: string | null;
   /** The sentence that named the competitor, for a mention found in a thread. */
   quote: string | null;
+  reasonCategory: ReasonCategory | null;
+  switchingEvidence: SwitchingEvidence | null;
+  explanation: string | null;
   foundAt: Date;
   postId: string;
   title: string;
@@ -129,6 +132,9 @@ export async function listMentions(
       sentiment: competitorMentions.sentiment,
       summary: competitorMentions.summary,
       quote: competitorMentions.quote,
+      reasonCategory: competitorMentions.reasonCategory,
+      switchingEvidence: competitorMentions.switchingEvidence,
+      explanation: competitorMentions.explanation,
       foundAt: competitorMentions.foundAt,
       postId: competitorMentions.postId,
       title: redditPosts.title,
@@ -155,6 +161,9 @@ export async function listMentions(
   return rows.map((row) => ({
     ...row,
     sentiment: (row.sentiment as Sentiment | null) ?? null,
+    reasonCategory: (row.reasonCategory as ReasonCategory | null) ?? null,
+    switchingEvidence: (row.switchingEvidence as SwitchingEvidence | null) ?? null,
+    explanation: row.explanation ?? null,
     createdAt: new Date(row.createdAt),
   }));
 }
@@ -297,4 +306,210 @@ export function topCompetitors(
     }
   }
   return [...counts.values()].sort((a, b) => b.total - a.total);
+}
+
+export type ReasonGroup = {
+  competitor: string;
+  reasonCategory: ReasonCategory;
+  /** Number of independent Reddit threads (posts) supporting this finding */
+  distinctThreads: number;
+  /** Total mentions count (threads + replies) */
+  totalMentions: number;
+  /** Whether supported by multiple distinct threads or only a single observation */
+  isRecurring: boolean;
+  /** Representative explanation grounded in source evidence */
+  representativeExplanation: string;
+  /** All supporting mentions sorted newest first */
+  mentions: MentionView[];
+};
+
+export type SwitcherOpportunity = {
+  id: string;
+  competitor: string;
+  signal: "actively_switching" | "evaluating_alternatives";
+  reasonCategory: ReasonCategory;
+  explanation: string;
+  quoteOrSummary: string;
+  postId: string;
+  title: string;
+  url: string;
+  subreddit: string;
+  subredditIconUrl: string | null;
+  author: string | null;
+  avatarUrl: string | null;
+  createdAt: Date;
+  distinctThreads: number;
+  allMentionsInThread: MentionView[];
+};
+
+/**
+ * Groups positive mentions by competitor and praise category, counting independent
+ * threads to distinguish recurring praise patterns from single observations.
+ */
+export function groupLoveReasons(mentions: MentionView[]): ReasonGroup[] {
+  const positive = mentions.filter(
+    (m) => m.sentiment === "positive" || m.switchingEvidence === "positive_recommendation",
+  );
+
+  const groups = new Map<string, MentionView[]>();
+  for (const m of positive) {
+    const reason = m.reasonCategory ?? "recommendation_value_delivered";
+    const key = `${m.competitor}::${reason}`;
+    const list = groups.get(key) ?? [];
+    list.push(m);
+    groups.set(key, list);
+  }
+
+  const result: ReasonGroup[] = [];
+  for (const [key, groupMentions] of groups) {
+    const [competitor, reasonCategory] = key.split("::") as [string, ReasonCategory];
+    const distinctThreads = new Set(groupMentions.map((m) => m.postId)).size;
+    const sortedMentions = [...groupMentions].sort(
+      (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+    );
+
+    const representativeExplanation =
+      sortedMentions.find((m) => m.explanation && m.explanation.length > 5)?.explanation ??
+      sortedMentions.find((m) => m.summary && m.summary.length > 5)?.summary ??
+      sortedMentions.find((m) => m.quote && m.quote.length > 5)?.quote ??
+      "User satisfaction with the product";
+
+    result.push({
+      competitor,
+      reasonCategory,
+      distinctThreads,
+      totalMentions: groupMentions.length,
+      isRecurring: distinctThreads >= 2,
+      representativeExplanation,
+      mentions: sortedMentions,
+    });
+  }
+
+  return result.sort((a, b) => {
+    if (b.distinctThreads !== a.distinctThreads) {
+      return b.distinctThreads - a.distinctThreads;
+    }
+    return b.totalMentions - a.totalMentions;
+  });
+}
+
+/**
+ * Groups complaints by competitor and limitation category, counting independent
+ * threads. Labels single observations as examples and never implies that an
+ * unverified complaint proves lost customers.
+ */
+export function groupDislikeReasons(mentions: MentionView[]): ReasonGroup[] {
+  const negative = mentions.filter(
+    (m) =>
+      m.sentiment === "negative" ||
+      m.switchingEvidence === "dissatisfied_no_switch" ||
+      m.switchingEvidence === "actively_switching" ||
+      m.switchingEvidence === "evaluating_alternatives",
+  );
+
+  const groups = new Map<string, MentionView[]>();
+  for (const m of negative) {
+    const reason = m.reasonCategory ?? "other";
+    const key = `${m.competitor}::${reason}`;
+    const list = groups.get(key) ?? [];
+    list.push(m);
+    groups.set(key, list);
+  }
+
+  const result: ReasonGroup[] = [];
+  for (const [key, groupMentions] of groups) {
+    const [competitor, reasonCategory] = key.split("::") as [string, ReasonCategory];
+    const distinctThreads = new Set(groupMentions.map((m) => m.postId)).size;
+    const sortedMentions = [...groupMentions].sort(
+      (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+    );
+
+    const representativeExplanation =
+      sortedMentions.find((m) => m.explanation && m.explanation.length > 5)?.explanation ??
+      sortedMentions.find((m) => m.summary && m.summary.length > 5)?.summary ??
+      sortedMentions.find((m) => m.quote && m.quote.length > 5)?.quote ??
+      "Reported limitation or complaint with the product";
+
+    result.push({
+      competitor,
+      reasonCategory,
+      distinctThreads,
+      totalMentions: groupMentions.length,
+      isRecurring: distinctThreads >= 2,
+      representativeExplanation,
+      mentions: sortedMentions,
+    });
+  }
+
+  return result.sort((a, b) => {
+    if (b.distinctThreads !== a.distinctThreads) {
+      return b.distinctThreads - a.distinctThreads;
+    }
+    return b.totalMentions - a.totalMentions;
+  });
+}
+
+/**
+ * Extracts conversations where users show explicit evidence of switching or evaluating
+ * alternatives. Negative comments without switching evidence are excluded.
+ * Independent threads are unified so multiple replies do not inflate opportunities.
+ */
+export function listPotentialSwitchers(mentions: MentionView[]): SwitcherOpportunity[] {
+  const candidates = mentions.filter(
+    (m) =>
+      m.switchingEvidence === "actively_switching" ||
+      m.switchingEvidence === "evaluating_alternatives",
+  );
+
+  const byThread = new Map<string, MentionView[]>();
+  for (const m of candidates) {
+    const key = `${m.competitor}::${m.postId}`;
+    const list = byThread.get(key) ?? [];
+    list.push(m);
+    byThread.set(key, list);
+  }
+
+  const result: SwitcherOpportunity[] = [];
+  for (const threadMentions of byThread.values()) {
+    const sorted = [...threadMentions].sort(
+      (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+    );
+    const activeMention = sorted.find((m) => m.switchingEvidence === "actively_switching");
+    const primary = activeMention ?? sorted[0];
+
+    const signal: "actively_switching" | "evaluating_alternatives" =
+      primary.switchingEvidence === "actively_switching"
+        ? "actively_switching"
+        : "evaluating_alternatives";
+
+    const reasonCategory = primary.reasonCategory ?? "other";
+    const quoteOrSummary = primary.quote || primary.summary || primary.title;
+    const explanation = primary.explanation || primary.summary || "Considering alternatives";
+
+    result.push({
+      id: primary.id,
+      competitor: primary.competitor,
+      signal,
+      reasonCategory,
+      explanation,
+      quoteOrSummary,
+      postId: primary.postId,
+      title: primary.title,
+      url: primary.url,
+      subreddit: primary.subreddit,
+      subredditIconUrl: primary.subredditIconUrl,
+      author: primary.author,
+      avatarUrl: primary.avatarUrl,
+      createdAt: primary.createdAt,
+      distinctThreads: 1,
+      allMentionsInThread: sorted,
+    });
+  }
+
+  return result.sort((a, b) => {
+    if (a.signal !== b.signal) {
+      return a.signal === "actively_switching" ? -1 : 1;
+    }
+    return b.createdAt.getTime() - a.createdAt.getTime();
+  });
 }

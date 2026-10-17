@@ -79,6 +79,9 @@ async function writeMentions(
       postId: entry.post.id,
       sentiment: entry.verdict.sentiment,
       summary: entry.verdict.summary,
+      reasonCategory: entry.verdict.reasonCategory,
+      switchingEvidence: entry.verdict.switchingEvidence,
+      explanation: entry.verdict.explanation,
       foundAt: new Date(),
     }));
   if (rows.length === 0) {
