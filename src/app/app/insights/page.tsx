@@ -6,6 +6,7 @@ import { CommunitiesTable } from "@/components/insights/CommunitiesTable";
 import { InsightsTabs, type InsightsTab } from "@/components/insights/InsightsTabs";
 import { ThemeCard } from "@/components/insights/ThemeCard";
 import { LearningView } from "@/components/insights/LearningView";
+import { DemandGapsView } from "@/components/insights/DemandGapsView";
 import { errorSentence, relativeAge } from "@/lib/format";
 import { lastRunJob } from "@/jobs/enqueue";
 import { requireLocalUser } from "@/lib/auth";
@@ -13,6 +14,7 @@ import { allowanceFor } from "@/lib/throttle";
 import { PaidButton } from "@/components/PaidButton";
 import { listCommunities, listThemes } from "@/lib/insights/read";
 import { getProjectLearningSnapshot } from "@/lib/learning";
+import { getProjectDemandGaps } from "@/lib/gaps";
 import { parseScoring } from "@/lib/scoring/weights";
 import { requireActiveProject } from "@/lib/projects";
 
@@ -41,11 +43,14 @@ export default async function InsightsPage({ searchParams }: InsightsPageProps) 
       ? "communities"
       : params.tab === "learning"
         ? "learning"
-        : "themes";
-  const [themes, communities, learningSnapshot, job, allowance] = await Promise.all([
+        : params.tab === "gaps"
+          ? "gaps"
+          : "themes";
+  const [themes, communities, learningSnapshot, gapData, job, allowance] = await Promise.all([
     listThemes(project.id),
     listCommunities(project.id),
     getProjectLearningSnapshot(project.id),
+    tab === "gaps" ? getProjectDemandGaps(project.id) : null,
     lastRunJob("insights", project.id),
     allowanceFor(user.id, "insights"),
   ]);
@@ -70,7 +75,25 @@ export default async function InsightsPage({ searchParams }: InsightsPageProps) 
         </form>
       </div>
       <InsightsTabs active={tab} projectId={project.id} />
-      {tab === "learning" ? (
+      {tab === "gaps" ? (
+        <DemandGapsView
+          projectId={project.id}
+          projectUrl={project.url}
+          candidates={gapData?.candidates ?? []}
+          inspection={
+            gapData?.inspection ?? {
+              inspectionId: null,
+              status: "not_inspected",
+              inspectedAt: null,
+              rootUrl: project.url,
+              pagesCount: 0,
+              pages: [],
+              error: null,
+            }
+          }
+          hasLeads={gapData?.hasLeads ?? false}
+        />
+      ) : tab === "learning" ? (
         <LearningView
           projectId={project.id}
           snapshot={learningSnapshot}

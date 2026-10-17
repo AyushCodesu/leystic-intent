@@ -185,3 +185,106 @@ Centralized in `src/lib/learning/constants.ts` and `src/lib/learning/engine.ts`:
 ### 8. Known Limitations
 * Learning patterns currently evaluate single categorical dimensions (`community`, `stage`, `kind`) independently rather than sparse cross-dimensional tuples, preventing overfitting on small founder datasets.
 * Learned priority applies to Reddit buyer leads; X asks currently lack subreddit metadata and remain ordered by model fit and freshness.
+
+---
+
+## 10. Demand-to-Page Gap Finder V1: Connect Buyer Demand to Website Coverage Gaps
+
+**Date**: October 2026
+**Commit Target**: `feat: connect buyer demand to website coverage gaps`
+
+### 1. Objective
+Connect Leystic's public buyer-intent discovery and Learning V1 outcome tracking to the founder's own website discoverability. Identify recurring buyer questions and problem descriptions, index successfully inspected pages from the founder's website, match demand against existing page metadata, provide a founder confirmation workflow, and prioritize actionable demand-to-page coverage gaps.
+
+### 2. Evidence Boundary & Scoped Language
+* **Observed demand**: Verbatim persisted conversations, verified Reddit source URLs, intent stages, communities, and commercial outcomes.
+* **Observed website coverage**: Successfully inspected pages on the configured website domain, with extracted titles, descriptions, canonical URLs, H1s, and headings.
+* **Founder-confirmed mapping**: Explicit founder confirmation that a page addresses a discovered demand, provides a partial answer, or represents a confirmed gap.
+* **Interpretation**: Evidence-bounded explanations explaining why an apparent gap may deserve attention without asserting unproven claims regarding Google search ranking or market-wide demand.
+
+### 3. Website Page Inventory & Network Security
+* **SSRF Protection (`src/lib/gaps/security.ts`)**:
+  * Protocol restricted to `http:` and `https:`.
+  * Blocks `localhost`, `.local`, `.internal`, `0.0.0.0`, all private RFC1918 ranges, link-local / AWS metadata (`169.254.169.254`), carrier-grade NAT, test nets, multicast, reserved addresses, and IPv6 private equivalents.
+  * Live DNS resolution validation prevents DNS rebinding or private IP pivoting.
+  * Manual redirect handling (`maxRedirects = 3`) re-validates every redirect hop against SSRF policies and domain bounds.
+* **Inspection Bounds (`src/lib/gaps/constants.ts`)**:
+  * `MAX_DISCOVERED_URLS = 50`: discovery queue limit.
+  * `MAX_FETCHED_PAGES = 25`: maximum pages crawled per manual inspection request.
+  * `FETCH_TIMEOUT_MS = 6000`: per-page request timeout.
+  * `MAX_RESPONSE_BYTES = 512 * 1024` (512 KB): stream-level body byte cap.
+  * `MAX_SITEMAP_BYTES = 1024 * 1024` (1 MB): sitemap XML limit.
+* **Robots.txt & Sitemap Discovery (`src/lib/gaps/html.ts`, `crawler.ts`)**:
+  * Respects `robots.txt` disallow rules.
+  * Crawls sitemaps referenced in `robots.txt` or default `/sitemap.xml`.
+  * Falls back to homepage crawling and internal link traversal when sitemaps are absent.
+  * Canonical URL deduplication avoids redundant page fetches.
+* **Explicit User Initiation**:
+  * Zero crawling occurs during page load, render, or background refresh.
+  * Triggered exclusively by explicit founder action ("Inspect website coverage").
+
+### 4. Deterministic Demand Analysis
+* Centralized in `src/lib/gaps/demand.ts`:
+  * Bounded query (`LEAD_SAMPLE_LIMIT = 250`) strictly filtered by `leads.projectId = projectId`.
+  * Thread deduplication: groups multiple leads sharing the same `postId` into single conversations to prevent comment threads from artificially inflating demand counts.
+  * Integrates Learning V1 outcome semantics (`qualified_progress`, `engagement`, `explicit_mismatch`, `unlabelled`).
+  * Normalizes topic phrases with stop-word filtering and 2-gram extraction.
+  * Preserves verified source URLs and excerpts for every supporting conversation.
+  * Flags weakly supported single conversations (`weaklySupported = true`) for founder review.
+
+### 5. Matching & Candidate Gap Prioritization
+* **Matching Engine (`src/lib/gaps/matching.ts`)**:
+  * Deterministic term and suffix-stemming matching (`-ies`, `-es`, `-s`) comparing demand concepts against page title, h1, path, headings, and description.
+  * Assigns coverage statuses: `matched` (score >= 6), `possible_match` (score >= 2), `no_match_found` (score < 2), `insufficient_evidence` (uninspected / failed crawl).
+* **Prioritization (`src/lib/gaps/prioritization.ts`)**:
+  * `high`: Requires unaddressed coverage (`no_match_found` or founder `confirmed_gap`) AND empirical significance ($\ge 2$ distinct threads OR $\ge 1$ qualified commercial outcome). Never marked high priority merely because a page was not found.
+  * `medium`: Single unlabelled conversation with `no_match_found`, or multiple conversations with `possible_match`.
+  * `developing`: Single conversation with partial match or uninspected site.
+  * `addressed`: Confirmed match by founder or strong automated match.
+* **Three-Part Scoped Explanation**:
+  * **1. What we observed**: Concrete conversation counts, subreddits, outcome breakdown, and clickable links to verified Reddit posts.
+  * **2. Why it may matter**: Bounded interpretation explaining the potential discoverability gap.
+  * **3. What needs confirmation**: Transparent status and founder review controls.
+
+### 6. Founder Confirmation Workflow & Persistence
+* **Confirmation Actions (`src/app/app/insights/actions.ts`)**:
+  * `confirmDemandPageMappingAction` allows founders to confirm a match, mark partial answer, confirm gap, or reset to unconfirmed.
+  * Enforces server-side authorization via `requireOwnedProject(projectId)`.
+  * Historical leads and outcome records are never mutated.
+* **Database Schema & Migrations (`drizzle/0041_demand_page_gaps.sql`, `src/db/schema/tenant.ts`)**:
+  * `website_inspections`: records inspection runs, status (`success`, `partial`, `failed`), pages crawled, and error details.
+  * `website_pages`: stores indexed page metadata associated with `inspectionId`.
+  * `demand_page_confirmations`: stores founder confirmation overrides per `(projectId, demandGroupId)`.
+* **Snapshot Preservation Guarantee**:
+  * If a subsequent inspection attempt fails, the previous successful inspection snapshot and its indexed pages are fully preserved.
+
+### 7. Insights UI Integration (`src/components/insights/DemandGapsView.tsx`)
+* Added dedicated **Demand gaps** tab in `src/components/insights/InsightsTabs.tsx`.
+* Overview card with inspection status, last inspected timestamp, and explicit "Inspect website coverage" / "Re-inspect website" trigger.
+* Metrics strip displaying total demand topics, high-priority gaps, confirmed gaps, and addressed needs.
+* Interactive candidate gap cards rendering the three-part evidence breakdown, verified source links, external page links, and confirmation buttons.
+* Clean empty states for projects with no leads, uninspected websites, and missing website URLs.
+
+### 8. Cost & Provider Boundaries
+* Zero LLM calls (no OpenRouter, OpenAI, Anthropic, or AIProvider).
+* Zero AnyAPI web crawling calls.
+* Zero paid SEO providers (no Firecrawl, DataForSEO, Ahrefs, Semrush).
+* Works fully offline with hermetic unit tests.
+
+### 9. Verification Results
+* **Test Suite**: 81 test files passed (732 tests passed, 31 skipped database-backed suites when PostgreSQL is offline, 0 failures).
+* **New Test Suites**:
+  * `tests/gapsSecurity.test.ts`: 13 tests covering SSRF prevention, IP validation, and safeFetch bounds.
+  * `tests/gapsHtml.test.ts`: 4 tests covering metadata extraction, robots.txt, and sitemap parsing.
+  * `tests/gapsCrawler.test.ts`: 3 tests covering bounded crawling, fallback to homepage, and failure handling.
+  * `tests/gapsDemand.test.ts`: 4 tests covering thread deduplication, outcome categorization, and topic extraction.
+  * `tests/gapsMatching.test.ts`: 4 tests covering phrase/stem matching and coverage status assignment.
+  * `tests/gapsPrioritization.test.ts`: 3 tests covering priority tiers, reason generation, and scoped explanations.
+  * `tests/gapsUI.test.ts`: 3 tests covering component contracts, empty states, and snapshot preservation.
+  * `tests/gapsStore.test.ts`: 1 database test covering persistence and tenant isolation.
+* **Static Verification**:
+  * `npm run typecheck`: 0 errors.
+  * `npm run lint`: 0 errors, 0 warnings.
+  * `npm run build`: successful production build.
+  * `git diff --check`: 0 whitespace issues.
+  * Typography: verified compliance with `tests/typography.test.ts` (0 unicode em/en-dashes in `src/`).

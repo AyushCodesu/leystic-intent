@@ -558,3 +558,81 @@ export const userActions = pgTable(
   },
   (t) => [index("user_actions_user_action_at_idx").on(t.userId, t.action, t.at)],
 );
+
+/**
+ * A website inspection run for a project. Records root URL, status, and summary counts.
+ * Preserves historical snapshots so failed crawls never destroy existing coverage data.
+ */
+export const websiteInspections = pgTable(
+  "website_inspections",
+  {
+    id: id(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    rootUrl: text("root_url").notNull(),
+    status: text("status").notNull(), // "success" | "partial" | "failed"
+    pagesFound: integer("pages_found").notNull().default(0),
+    pagesCrawled: integer("pages_crawled").notNull().default(0),
+    hasSitemap: boolean("has_sitemap").notNull().default(false),
+    error: text("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [index("website_inspections_project_idx").on(t.projectId, t.startedAt.desc())],
+);
+
+/**
+ * An inspected webpage belonging to a successful or partial website inspection snapshot.
+ * Stores extracted metadata (title, description, canonical, h1, headings, path).
+ */
+export const websitePages = pgTable(
+  "website_pages",
+  {
+    id: id(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    inspectionId: text("inspection_id")
+      .notNull()
+      .references(() => websiteInspections.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    canonicalUrl: text("canonical_url").notNull(),
+    title: text("title"),
+    description: text("description"),
+    h1: text("h1"),
+    headings: text("headings").array(),
+    path: text("path").notNull(),
+    crawledAt: timestamp("crawled_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("website_pages_project_idx").on(t.projectId),
+    index("website_pages_inspection_idx").on(t.inspectionId),
+  ],
+);
+
+/**
+ * Founder-confirmed demand-to-page mappings.
+ * Allows founders to confirm or refine automated candidate matches without altering lead records.
+ */
+export const demandPageConfirmations = pgTable(
+  "demand_page_confirmations",
+  {
+    id: id(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    demandGroupId: text("demand_group_id").notNull(),
+    status: text("status").notNull(), // "confirmed_match" | "partial_match" | "confirmed_gap" | "unconfirmed"
+    confirmedPageUrl: text("confirmed_page_url"),
+    notes: text("notes"),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("demand_page_confirmations_project_group_idx").on(
+      t.projectId,
+      t.demandGroupId,
+    ),
+  ],
+);

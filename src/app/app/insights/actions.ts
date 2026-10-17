@@ -47,3 +47,44 @@ export async function applyCommunitySuggestionAction(
   await rerankProject(project.id, nextScoring);
   revalidatePath("/app", "layout");
 }
+
+/**
+ * Triggers an explicit, user-initiated website inspection.
+ * Safely fetches homepage and sitemap pages up to bounds without external crawling providers.
+ */
+export async function inspectWebsiteAction(projectId: string): Promise<void> {
+  const { project } = await requireOwnedProject(projectId);
+  if (!project.url) {
+    throw new Error("Project does not have a configured website URL.");
+  }
+
+  const { crawlWebsiteInventory, saveWebsiteInspection } = await import("@/lib/gaps");
+  const result = await crawlWebsiteInventory(project.url);
+  await saveWebsiteInspection(project.id, project.url, result);
+
+  revalidatePath(`/app/insights`);
+}
+
+/**
+ * Persists a founder's confirmation or refinement of a candidate demand-to-page mapping.
+ */
+export async function confirmDemandPageMappingAction(
+  projectId: string,
+  demandGroupId: string,
+  status: "unconfirmed" | "confirmed_match" | "partial_match" | "confirmed_gap",
+  confirmedPageUrl?: string | null,
+  notes?: string | null,
+): Promise<void> {
+  const { project } = await requireOwnedProject(projectId);
+  const { saveFounderConfirmation } = await import("@/lib/gaps");
+
+  await saveFounderConfirmation(
+    project.id,
+    demandGroupId,
+    status,
+    confirmedPageUrl,
+    notes,
+  );
+
+  revalidatePath(`/app/insights`);
+}
