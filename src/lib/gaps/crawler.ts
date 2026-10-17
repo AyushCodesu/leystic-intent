@@ -6,6 +6,7 @@ import {
 } from "./constants";
 import { extractPageMetadata, parseRobotsTxt, parseSitemapXml } from "./html";
 import { safeFetch, validateSafeUrl } from "./security";
+import type { DnsResolver, SafeHttpTransport } from "./security";
 import type { InspectedPage, PageInventoryResult } from "./types";
 
 const PRODUCT_PATH_PATTERNS = [
@@ -29,6 +30,8 @@ function scorePathRelevance(path: string): number {
 export type CrawlOptions = {
   fetchFn?: typeof fetch;
   skipDnsCheck?: boolean;
+  dnsResolver?: DnsResolver;
+  transport?: SafeHttpTransport;
 };
 
 /**
@@ -42,10 +45,12 @@ export async function crawlWebsiteInventory(
 ): Promise<PageInventoryResult> {
   const fetchFn = options.fetchFn ?? fetch;
   const skipDnsCheck = options.skipDnsCheck ?? false;
+  const dnsResolver = options.dnsResolver;
+  const transport = options.transport;
 
   let rootParsed: URL;
   try {
-    rootParsed = await validateSafeUrl(rootUrl, { skipDnsCheck });
+    rootParsed = await validateSafeUrl(rootUrl, { skipDnsCheck, dnsResolver });
   } catch (err) {
     return {
       status: "failed",
@@ -68,6 +73,8 @@ export async function crawlWebsiteInventory(
     const robotsRes = await safeFetch(`${origin}/robots.txt`, {
       fetchFn,
       skipDnsCheck,
+      dnsResolver,
+      transport,
       allowedHost: rootHost,
       timeoutMs: FETCH_TIMEOUT_MS,
     });
@@ -91,6 +98,8 @@ export async function crawlWebsiteInventory(
       const sitemapRes = await safeFetch(sitemapUrl, {
         fetchFn,
         skipDnsCheck,
+        dnsResolver,
+        transport,
         allowedHost: rootHost,
         timeoutMs: FETCH_TIMEOUT_MS,
         maxBytes: MAX_SITEMAP_BYTES,
@@ -121,6 +130,8 @@ export async function crawlWebsiteInventory(
     const homeRes = await safeFetch(homepageUrl, {
       fetchFn,
       skipDnsCheck,
+      dnsResolver,
+      transport,
       allowedHost: rootHost,
       timeoutMs: FETCH_TIMEOUT_MS,
     });
@@ -204,6 +215,8 @@ export async function crawlWebsiteInventory(
       const res = await safeFetch(pageUrl, {
         fetchFn,
         skipDnsCheck,
+        dnsResolver,
+        transport,
         allowedHost: rootHost,
         timeoutMs: FETCH_TIMEOUT_MS,
       });

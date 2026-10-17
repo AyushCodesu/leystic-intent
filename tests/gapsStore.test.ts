@@ -3,7 +3,6 @@ import { describeDb, makeProject, makeUser } from "./fixtures/db";
 import {
   getFounderConfirmations,
   getLatestInspectionSnapshot,
-  getProjectDemandGaps,
   saveFounderConfirmation,
   saveWebsiteInspection,
 } from "@/lib/gaps/store";

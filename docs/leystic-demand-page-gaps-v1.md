@@ -47,12 +47,14 @@ To ensure honesty and avoid fabricated SEO claims, the system strictly separates
 
 Website crawling represents an untrusted network boundary. Leystic enforces conservative, centralized security bounds:
 
-* **SSRF Protection (`src/lib/gaps/security.ts`)**:
+* **SSRF & DNS Rebinding Protection (`src/lib/gaps/security.ts`)**:
   * Protocol restricted to `http:` and `https:`.
   * Blocks `localhost`, `.local`, `.internal`, `.lan`, `0.0.0.0`, and all private/reserved IPv4 ranges (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` AWS metadata, carrier-grade NAT, test nets, multicast, reserved).
-  * Blocks IPv6 loopback (`::1`), unique local (`fc00::/7`), link-local (`fe80::/10`), and IPv4-mapped addresses.
-  * Real-time DNS resolution checks to ensure destinations do not resolve to internal network resources.
-  * Re-validates every redirect hop manually (`maxRedirects = 3`), ensuring redirects cannot escape the permitted project host or pivot to internal endpoints.
+  * Blocks IPv6 loopback (`::1`), unique local (`fc00::/7`), link-local (`fe80::/10`), multicast (`ff00::/8`), documentation (`2001:db8::/32`), benchmarking, discard, and IPv4-mapped addresses (`::ffff:`).
+  * Resolves all IPv4 and IPv6 DNS answers (`lookup(hostname, { all: true })`), rejecting any destination if mixed public and private answers or any private addresses are returned.
+  * Direct socket connection pinning (`defaultNodeTransport`) ensures the client connects strictly to the validated IP, eliminating TOCTOU DNS rebinding vulnerabilities without allowing secondary DNS queries at connection time.
+  * Preserves correct TLS SNI (`servername`), peer certificate validation, and HTTP `Host` header behavior while pinned.
+  * Re-validates every redirect hop manually (`maxRedirects = 3`) with fresh DNS resolution and address pinning, ensuring redirects cannot escape the permitted project host or pivot to internal endpoints.
 * **Crawl Bounds (`src/lib/gaps/constants.ts`)**:
   * `MAX_DISCOVERED_URLS = 50`: discovery queue ceiling.
   * `MAX_FETCHED_PAGES = 25`: maximum pages crawled per manual inspection request.
