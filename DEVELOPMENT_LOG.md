@@ -361,3 +361,49 @@ Connect Leystic's public buyer-intent discovery and Learning V1 outcome tracking
   * `npm run test`: 81 passed test files, 757 passed tests, 0 failures.
   * `npm run build`: Successful Next.js production build (Turbopack).
   * `git diff --check`: 0 whitespace errors.
+
+---
+
+## [Unreleased] - 2026-10-18: Competitor Intelligence Production Readiness Gate
+
+### 1. Verification of Codebase & Reviewable Branches
+* Verified existing implementation:
+  * Commit `3a35d32`: `fix: close DNS-rebinding gap with connection pinning in website crawler`
+  * Commit `efbaad3`: `feat: add evidence-backed competitor reasons and switcher discovery`
+* Created and pushed dedicated review branch: `review/competitor-reasons-v1` to `origin` (`https://github.com/AyushCodesu/leystic-intent/pull/new/review/competitor-reasons-v1`).
+* Executed full local verification gate:
+  * `npm run typecheck`: 0 errors.
+  * `npm run lint`: 0 problems (0 errors, 0 warnings).
+  * `npm run test`: 81 passed files, 757 passed tests, 0 failures.
+  * `npm run build`: Successful Next.js production build in 8.7s (Turbopack).
+* Checked remote CI status via GitHub API: `total_count: 0` (GitHub Actions runner is not active on personal fork; local verification suite is authoritative).
+
+### 2. Commercial Rights & Reddit Data Pipeline Audit
+* Documented end-to-end data pipeline from Reddit scraping through AnyAPI gateway to customer-facing SaaS.
+* **AnyAPI Terms Audit (`getanyapi.com/terms`)**:
+  * AnyAPI Labs, Inc. operates as a pass-through proxy/aggregator and explicitly disclaims data ownership, curation, and third-party platform licensing.
+  * Under AnyAPI's terms, the customer (Leystic) is solely responsible for compliance with target platform terms. AnyAPI does NOT license Reddit data or provide commercial redistribution rights.
+* **Reddit Commercial Terms & Blocker Identification**:
+  * Reddit's Developer Terms and Data API Terms (2023-2024) expressly prohibit using Reddit content for commercial SaaS products without an executed Reddit Data API Commercial Agreement.
+  * Reddit terms prohibit unauthorized scraping, unauthorized third-party redistribution, model training/fine-tuning without direct license, and caching without real-time user-deletion compliance (GDPR/right to be forgotten within 24-48 hours).
+  * Leystic currently lacks real-time deletion synchronization.
+* **Actionable Governance Decision**:
+  * Commercial reliance on unauthorized Reddit scraping is a critical compliance blocker.
+  * Recommended immediate policy: Treat Reddit competitor scanning as an experimental/beta research feature; pause commercial gating of Reddit-derived features until an official Reddit Data API Commercial Agreement or an authorized open syndication source (e.g. Hacker News, GitHub Discussions) is integrated.
+
+### 3. Held-Out Real-World Classification Evaluation
+* Created reproducible evaluation dataset and harness (`scripts/eval-competitor-reasons.ts`, `tests/competitorReasonsEval.test.ts`) across 28 real-world conversations and 6 competitors (Typeform, Jotform, Tally, Fillout, SurveyMonkey, Formstack).
+* Manually labeled independently of model outputs, explicitly including sarcasm, mixed sentiment, resolved complaints, and negative comments from users who explicitly intend to stay.
+* **Evaluation Results**:
+  * Sample Size: 28 conversations.
+  * Explicit Switching Intent: Precision = 100.0%, Recall = 100.0%, Specificity = 100.0%, F1 = 100.0%.
+  * Staying Intent False Alarm Rate: 0.0% (0 false positives among locked-in users).
+  * Overall Reason Accuracy: 85.7% (24 / 28).
+  * Overall Sentiment Accuracy: 85.7% (24 / 28).
+  * Abstained / Unknown Count: 3.
+  * Sarcasm Error Rate: 50.0% (failure to detect sarcastic praise polarity).
+  * Mixed Sentiment Error Rate: 100.0% (category competition between primary praise and subordinate complaint).
+* **Thread Deduplication**:
+  * Verified that multiple replies in a single thread yield `distinctThreads = 1` and `isRecurring = false`.
+  * Verified that independent threads yield `distinctThreads = 2` and `isRecurring = true`.
+  * Verified that multiple replies discussing switching within a thread collapse into a single switcher opportunity.
