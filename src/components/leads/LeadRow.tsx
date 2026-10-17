@@ -20,6 +20,8 @@ type LeadRowProps = {
   createdAt: Date;
   /** The one thing the row rates by: a score for a lead, a verdict for a held item. */
   trailing: React.ReactNode;
+  learnedTier?: 1 | 2 | 3;
+  learnedExplanation?: string;
 };
 
 /**
@@ -47,6 +49,8 @@ export function LeadRow({
   subredditIconUrl,
   createdAt,
   trailing,
+  learnedTier,
+  learnedExplanation,
 }: LeadRowProps) {
   return (
     <RowLink
@@ -73,6 +77,21 @@ export function LeadRow({
             />
           )}
           <span className="text-mono shrink-0 text-fg-muted">{shortAge(createdAt)}</span>
+          {learnedTier === 1 ? (
+            <span
+              className="rounded-control bg-brand-soft px-1.5 py-0.5 text-mono text-brand shrink-0 text-[10px] font-medium"
+              title={learnedExplanation}
+            >
+              Promising
+            </span>
+          ) : learnedTier === 3 ? (
+            <span
+              className="rounded-control bg-surface-2 px-1.5 py-0.5 text-mono text-fg-muted shrink-0 text-[10px]"
+              title={learnedExplanation}
+            >
+              Deprioritized
+            </span>
+          ) : null}
           {excerpt && !nested ? (
             <span className="text-small min-w-0 flex-1 truncate text-fg-muted">in: {title}</span>
           ) : null}

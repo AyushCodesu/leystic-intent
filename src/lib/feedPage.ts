@@ -47,6 +47,7 @@ function filterKey(filter: FeedFilter, widenable: boolean): string {
     filter.stage ?? null,
     filter.theme ?? null,
     filter.at ?? null,
+    filter.order ?? "score",
     widenable,
   ]);
 }

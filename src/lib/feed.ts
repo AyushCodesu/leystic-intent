@@ -40,6 +40,8 @@ export const FEED_WINDOWS = [1, 7, 30, "all"] as const;
 
 export type FeedWindow = (typeof FEED_WINDOWS)[number];
 
+export type FeedOrder = "score" | "learned";
+
 export type FeedFilter = {
   status: LeadStatus;
   days: FeedWindow;
@@ -54,6 +56,8 @@ export type FeedFilter = {
   stage?: string;
   /** One Insights theme's id, narrowing the feed to the leads that theme holds. */
   theme?: string;
+  /** Optional ordering: default score (match + freshness) or learned outcome-informed priority. */
+  order?: FeedOrder;
 };
 
 export type FeedFacets = { subreddits: string[]; stages: string[] };
@@ -68,6 +72,7 @@ export type FeedParams = {
   stage?: string;
   theme?: string;
   lead?: string;
+  order?: string;
 };
 
 const STATUSES: LeadStatus[] = ["new", "replied", "hidden", "not_fit", "resolved"];
@@ -168,6 +173,7 @@ export function feedFilter(params: FeedParams): FeedFilter {
     subreddit: params.subreddit || undefined,
     stage: params.stage || undefined,
     theme: params.theme || undefined,
+    order: params.order === "learned" ? "learned" : "score",
   };
 }
 
@@ -202,6 +208,8 @@ export type FeedRow = {
   createdAt: Date;
   fit: number | null;
   intent: number | null;
+  learnedTier?: 1 | 2 | 3;
+  learnedExplanation?: string;
 };
 
 /** One lead as the detail pane shows it: the post or comment, and how it judged. */
@@ -240,6 +248,8 @@ export type CardLead = {
   isComment: boolean;
   postAuthor: string | null;
   postAuthorAvatar: string | null;
+  learnedTier?: 1 | 2 | 3;
+  learnedExplanation?: string;
 };
 
 /**
@@ -249,6 +259,7 @@ export type CardLead = {
  */
 export function toCard(lead: FeedLead): CardLead {
   const isComment = lead.commentId !== null;
+  const raw = lead as Record<string, unknown>;
   return {
     id: lead.id,
     postId: lead.postId,
@@ -258,9 +269,11 @@ export function toCard(lead: FeedLead): CardLead {
     engagement: lead.engagement,
     kind: lead.kind,
     status: lead.status,
-    outcome: (lead as Record<string, unknown>).outcome as string | null | undefined,
-    outcomeRecordedAt: (lead as Record<string, unknown>).outcomeRecordedAt as Date | null | undefined,
-    outcomeNotes: (lead as Record<string, unknown>).outcomeNotes as string | null | undefined,
+    outcome: raw.outcome as string | null | undefined,
+    outcomeRecordedAt: raw.outcomeRecordedAt as Date | null | undefined,
+    outcomeNotes: raw.outcomeNotes as string | null | undefined,
+    learnedTier: raw.learnedTier as 1 | 2 | 3 | undefined,
+    learnedExplanation: raw.learnedExplanation as string | undefined,
     reason: lead.reason,
     matchedPhrase: lead.matchedPhrase,
     title: lead.title,
@@ -319,6 +332,8 @@ export function toRow(lead: FeedLead): FeedRow {
     createdAt: card.createdAt,
     fit: card.fit,
     intent: card.intent,
+    learnedTier: card.learnedTier,
+    learnedExplanation: card.learnedExplanation,
   };
 }
 

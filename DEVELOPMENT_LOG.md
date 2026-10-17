@@ -114,3 +114,74 @@ Implemented an additive, non-breaking outcome tracking loop to capture whether d
 * `docs/future-product-opportunities.md`: Competitive analysis (Lurk, Clean, Workflows.io, Glasa, Explee), evaluation of 8 differentiators, prioritization matrix, and top 3 candidate experiments.
 * `docs/leystic-intent-mvp.md`: Full end-to-end MVP workflow guide, architecture overview, cost tracking, and local deployment instructions.
 * `DEVELOPMENT_LOG.md`: This chronological development log.
+
+---
+
+## 9. Leystic Learning V1: Make Lead Discovery Improve With Experience
+
+**Date**: October 2026
+**Commit Target**: `feat: add outcome-informed lead learning`
+
+### 1. Objective
+Establish the first real differentiator for Leystic: learning from founder-recorded explicit commercial outcomes (`replied`, `meeting_booked`, `opportunity`, `customer`, `not_fit`) and using that evidence to help founders prioritize future buyer-intent opportunities deterministically without requiring AI model invocation.
+
+### 2. Outcome Semantics
+Centralized pure classification in `src/lib/learning/semantics.ts`:
+* **Qualified progress**: `meeting_booked`, `opportunity`, `customer`. Progressive commercial evidence, individually trackable.
+* **Engagement**: `replied`. Founder responded; distinct from a commercial qualification.
+* **Explicit mismatch**: `not_fit`. Lead marked as unsuitable by founder.
+* **Unlabelled / Unknown**: Missing, null, or invalid values contribute no success or failure evidence (never treated as failures).
+* **Guarantees**: Founder outcomes remain authoritative and are never mutated by the learning engine. Ordinary lead status is not substituted for explicit outcomes.
+
+### 3. Deterministic Evidence Rules & Sample Thresholds
+Centralized in `src/lib/learning/constants.ts` and `src/lib/learning/engine.ts`:
+* **Project Activation Threshold**: `MIN_PROJECT_LABELLED_LEADS = 5` and `MIN_PROJECT_TERMINAL_OUTCOMES = 5` (across qualified progress + `not_fit`). Learned priority ordering remains locked until met.
+* **Pattern Significance Threshold**: `MIN_PATTERN_TERMINAL_OUTCOMES = 4`. Any dimension below 4 terminal outcomes is classified as `insufficient_evidence` (developing).
+* **Promising Pattern**: At least `MIN_PROMISING_QUALIFIED_OUTCOMES = 2` qualified-progress outcomes, and qualified progress strictly exceeds `not_fit`.
+* **Repeated Mismatch**: At least `MIN_REPEATED_MISMATCH_OUTCOMES = 3` `not_fit` outcomes and zero qualified-progress outcomes.
+* **Mixed Evidence**: Terminal outcomes >= 4 but failing both directional thresholds.
+* **Query Bounding**: `OUTCOME_SAMPLE_LIMIT = 500` recent outcomes per project, ordered deterministically (`outcomeRecordedAt desc, scoredAt desc, id desc`).
+
+### 4. UI & Prioritization Behavior
+* **Insights Experience (`src/components/insights/LearningView.tsx`)**:
+  * Added contextual tab **Learned patterns** to `src/components/insights/InsightsTabs.tsx`.
+  * Overview metrics: total labelled leads, qualified progress breakdown, replies, not a fit, and dataset scope note.
+  * Positive evidence patterns: cards with actual counts and links to filtered leads in the feed. Includes optional action to adopt promising communities into manual scoring preferences (`applyCommunitySuggestionAction`).
+  * Repeated mismatches: explains deprioritization (never automatically hidden or excluded).
+  * Developing / mixed evidence: explains inconclusive sample sizes without fabricated confidence percentages.
+  * Empty state: renders clean guidance when no outcomes have been recorded.
+* **Feed Prioritization (`src/components/leads/FeedFilters.tsx`, `src/lib/learning/ordering.ts`)**:
+  * Added `order` pill with options `Score order` (default) and `Learned priority`.
+  * Implemented server-side SQL ordering before pagination via `buildLearnedFeedOrder`:
+    * Tier 1 (Promising patterns) -> Tier 2 (Neutral) -> Tier 3 (Repeated mismatches).
+    * Retains original `THREAD_BEST`, `THREAD_NEWEST`, and model scores as stable secondary ordering and tie-breakers.
+    * Feed filters (window, subreddit, stage, status) and pagination work identically.
+    * Explanatory badge rendered on `LeadRow` and `LeadDetail` (`Promising pattern` or `Deprioritized pattern`).
+    * Displays informative banner in `Feed.tsx` if Learned priority is selected when evidence is below threshold.
+
+### 5. Data Isolation & Security Guarantees
+* All queries strictly scoped by `leads.projectId = projectId`.
+* Project ownership verified via `requireOwnedProject(projectId)` before settings actions.
+* Zero cross-tenant outcome pooling or global dataset mixing.
+
+### 6. Cost & Provider Boundaries
+* Zero LLM provider or AnyAPI calls required. Pure deterministic TypeScript and SQL.
+* Works completely offline and with unset model API keys.
+
+### 7. Verification & Test Results
+* **Test Suite**: 74 test files passed (698 tests passed, 30 skipped database-backed suites, 0 failures).
+* **New Test Suites**:
+  * `tests/learningSemantics.test.ts`: 5 tests covering outcome classification and semantics.
+  * `tests/learningEngine.test.ts`: 13 tests covering threshold boundaries, deduplication, deterministic sorting, and lead assessment.
+  * `tests/learningPrioritization.test.ts`: 5 tests covering SQL ordering, score immutability, filter preservation, and tenant isolation.
+  * `tests/learningUI.test.ts`: 3 tests covering input immutability, zero model credentials, and empty state purity.
+* **Static Verification**:
+  * `npm run typecheck`: 0 errors.
+  * `npm run lint`: 0 errors, 0 warnings.
+  * `npm run build`: successful production build.
+  * `git diff --check`: 0 whitespace or formatting issues.
+  * Typography: verified adherence to no unicode em-dashes or en-dashes in `src`.
+
+### 8. Known Limitations
+* Learning patterns currently evaluate single categorical dimensions (`community`, `stage`, `kind`) independently rather than sparse cross-dimensional tuples, preventing overfitting on small founder datasets.
+* Learned priority applies to Reddit buyer leads; X asks currently lack subreddit metadata and remain ordered by model fit and freshness.

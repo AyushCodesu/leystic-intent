@@ -22,20 +22,25 @@ export default async function setup(): Promise<void> {
     }
     return;
   }
-  const target = new URL(url);
-  const name = target.pathname.replace(/^\//, "");
-  const admin = new URL(process.env.DATABASE_URL!);
-  const sql = postgres(admin.toString(), { max: 1 });
   try {
-    const [row] = await sql`select 1 from pg_database where datname = ${name}`;
-    if (!row) {
-      await sql.unsafe(`create database "${name.replaceAll('"', '""')}"`);
+    const target = new URL(url);
+    const name = target.pathname.replace(/^\//, "");
+    const admin = new URL(process.env.DATABASE_URL!);
+    const sql = postgres(admin.toString(), { max: 1, connect_timeout: 1 });
+    try {
+      const [row] = await sql`select 1 from pg_database where datname = ${name}`;
+      if (!row) {
+        await sql.unsafe(`create database "${name.replaceAll('"', '""')}"`);
+      }
+    } finally {
+      await sql.end().catch(() => {});
     }
-  } finally {
-    await sql.end();
+    await migrateDatabase(url);
+    await trimDatabase(url);
+  } catch (err) {
+    // If database connection fails (no local Postgres running), skip gracefully so unit tests can run
+    console.warn("Test database not reachable; skipping database setup:", (err as Error).message);
   }
-  await migrateDatabase(url);
-  await trimDatabase(url);
 }
 
 async function migrateDatabase(url: string): Promise<void> {

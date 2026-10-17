@@ -116,6 +116,15 @@ export function LeadDetail({ selection, projectId, competitors, scoring }: LeadD
               {intentWord(lead.intent)}
             </span>
           ) : null}
+          {lead.learnedTier === 1 ? (
+            <span className="rounded-control bg-brand-soft px-2 py-0.5 text-mono text-brand font-medium">
+              Promising pattern
+            </span>
+          ) : lead.learnedTier === 3 ? (
+            <span className="rounded-control bg-surface-2 px-2 py-0.5 text-mono text-fg-muted">
+              Deprioritized pattern
+            </span>
+          ) : null}
           <WorthACommentChip kind={lead.kind} />
           <PromoPolicyBadge
             projectId={projectId}
@@ -132,6 +141,9 @@ export function LeadDetail({ selection, projectId, competitors, scoring }: LeadD
           {lead.quality === null ? null : (
             <Called label="Why it ranks here" sentence={rankingSentence(lead, scoring)} />
           )}
+          {lead.learnedExplanation ? (
+            <Called label="Learned priority" sentence={lead.learnedExplanation} />
+          ) : null}
           {lead.isComment ? (
             <ReplyingIn
               title={lead.title}

@@ -20,6 +20,7 @@ import { atBounds, feedFilter } from "./feed";
 import { LEAD_AUTHOR, LEAD_AUTHOR_JOIN, LEAD_BODY, LEAD_URL, NEED_AT, leadsBase } from "./leadSql";
 import { STAGES } from "./scan/questions";
 import { daysAgo } from "./time";
+import { assessLead, buildLearnedFeedOrder, getProjectLearningSnapshot } from "./learning";
 
 import type {
   FeedFacets,
@@ -85,7 +86,10 @@ function feedQuery() {
 }
 
 /** One lead as every read of the feed hands it over. */
-export type FeedLead = Awaited<ReturnType<typeof feedQuery>>[number];
+export type FeedLead = Awaited<ReturnType<typeof feedQuery>>[number] & {
+  learnedTier?: 1 | 2 | 3;
+  learnedExplanation?: string;
+};
 
 /**
  * The window rule the whole Leads page reads, feed and header sentence alike:
@@ -202,10 +206,31 @@ export async function listLeads(
   filter: FeedFilter,
   page?: FeedPage,
 ): Promise<FeedLead[]> {
+  const snapshot = filter.order === "learned" ? await getProjectLearningSnapshot(projectId) : null;
+  const orderItems =
+    snapshot && snapshot.enoughEvidenceToPrioritize
+      ? buildLearnedFeedOrder(snapshot)
+      : FEED_ORDER;
+
   const query = feedQuery()
     .where(feedWhere(projectId, filter))
-    .orderBy(...FEED_ORDER);
-  return page ? query.limit(page.limit).offset(page.offset) : query;
+    .orderBy(...orderItems);
+  const rows = await (page ? query.limit(page.limit).offset(page.offset) : query);
+
+  if (snapshot && snapshot.enoughEvidenceToPrioritize) {
+    return rows.map((row) => {
+      const assessment = assessLead(
+        { subreddit: row.subreddit, stage: row.stage, kind: row.kind },
+        snapshot,
+      );
+      return {
+        ...row,
+        learnedTier: assessment.tier,
+        learnedExplanation: assessment.explanation,
+      };
+    });
+  }
+  return rows;
 }
 
 /** How many leads those pills hold, which is what the list column counts. */
@@ -254,6 +279,12 @@ export async function themeLinkLeads(
  * and none of the prose a row does.
  */
 export async function listLeadFaces(projectId: string, filter: FeedFilter): Promise<LeadFace[]> {
+  const snapshot = filter.order === "learned" ? await getProjectLearningSnapshot(projectId) : null;
+  const orderItems =
+    snapshot && snapshot.enoughEvidenceToPrioritize
+      ? buildLearnedFeedOrder(snapshot)
+      : FEED_ORDER;
+
   return leadsBase({
     id: sql<string>`'lead-' || ${leads.id}`,
     at: sql`${NEED_AT}`.mapWith(redditPosts.createdAt),
@@ -264,7 +295,7 @@ export async function listLeadFaces(projectId: string, filter: FeedFilter): Prom
   })
     .leftJoin(redditAuthors, LEAD_AUTHOR_JOIN)
     .where(feedWhere(projectId, filter))
-    .orderBy(...FEED_ORDER);
+    .orderBy(...orderItems);
 }
 
 /**
@@ -273,10 +304,24 @@ export async function listLeadFaces(projectId: string, filter: FeedFilter): Prom
  * pane has to open on it rather than falling back to the best lead.
  */
 export async function findLead(projectId: string, leadId: string): Promise<FeedLead | undefined> {
-  const rows = await feedQuery().where(
-    and(eq(leads.projectId, projectId), eq(leads.id, leadId)),
-  );
-  return rows[0];
+  const [rows, snapshot] = await Promise.all([
+    feedQuery().where(and(eq(leads.projectId, projectId), eq(leads.id, leadId))),
+    getProjectLearningSnapshot(projectId),
+  ]);
+  const lead = rows[0];
+  if (!lead) return undefined;
+  if (snapshot && snapshot.enoughEvidenceToPrioritize) {
+    const assessment = assessLead(
+      { subreddit: lead.subreddit, stage: lead.stage, kind: lead.kind },
+      snapshot,
+    );
+    return {
+      ...lead,
+      learnedTier: assessment.tier,
+      learnedExplanation: assessment.explanation,
+    };
+  }
+  return lead;
 }
 
 /**

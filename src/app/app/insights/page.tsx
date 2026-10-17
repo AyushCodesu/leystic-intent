@@ -5,12 +5,15 @@ import { EmptyState } from "@/components/EmptyState";
 import { CommunitiesTable } from "@/components/insights/CommunitiesTable";
 import { InsightsTabs, type InsightsTab } from "@/components/insights/InsightsTabs";
 import { ThemeCard } from "@/components/insights/ThemeCard";
+import { LearningView } from "@/components/insights/LearningView";
 import { errorSentence, relativeAge } from "@/lib/format";
 import { lastRunJob } from "@/jobs/enqueue";
 import { requireLocalUser } from "@/lib/auth";
 import { allowanceFor } from "@/lib/throttle";
 import { PaidButton } from "@/components/PaidButton";
 import { listCommunities, listThemes } from "@/lib/insights/read";
+import { getProjectLearningSnapshot } from "@/lib/learning";
+import { parseScoring } from "@/lib/scoring/weights";
 import { requireActiveProject } from "@/lib/projects";
 
 type InsightsPageProps = { searchParams: Promise<{ project?: string; tab?: string }> };
@@ -33,10 +36,16 @@ export default async function InsightsPage({ searchParams }: InsightsPageProps) 
   const params = await searchParams;
   const project = await requireActiveProject(user.id, params.project);
 
-  const tab: InsightsTab = params.tab === "communities" ? "communities" : "themes";
-  const [themes, communities, job, allowance] = await Promise.all([
+  const tab: InsightsTab =
+    params.tab === "communities"
+      ? "communities"
+      : params.tab === "learning"
+        ? "learning"
+        : "themes";
+  const [themes, communities, learningSnapshot, job, allowance] = await Promise.all([
     listThemes(project.id),
     listCommunities(project.id),
+    getProjectLearningSnapshot(project.id),
     lastRunJob("insights", project.id),
     allowanceFor(user.id, "insights"),
   ]);
@@ -61,7 +70,13 @@ export default async function InsightsPage({ searchParams }: InsightsPageProps) 
         </form>
       </div>
       <InsightsTabs active={tab} projectId={project.id} />
-      {tab === "communities" ? (
+      {tab === "learning" ? (
+        <LearningView
+          projectId={project.id}
+          snapshot={learningSnapshot}
+          scoring={parseScoring(project.scoring)}
+        />
+      ) : tab === "communities" ? (
         <CommunitiesTable rows={communities} />
       ) : themes.length === 0 ? (
         <EmptyState

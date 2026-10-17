@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import net from "node:net";
 import { PAID_KEYS, testDatabaseUrl } from "./testDatabase";
 
 /**
@@ -14,14 +15,43 @@ if (existsSync(".env")) {
   process.loadEnvFile(".env");
 }
 const url = testDatabaseUrl(process.env);
-const hasRealDb = Boolean(url);
-if (url) {
+
+function checkDatabaseReachable(dbUrl: string | undefined): Promise<boolean> {
+  if (!dbUrl) return Promise.resolve(false);
+  try {
+    const parsed = new URL(dbUrl);
+    const host = parsed.hostname || "localhost";
+    const port = Number(parsed.port) || 5432;
+    return new Promise((resolve) => {
+      const socket = net.createConnection({ host, port, timeout: 200 });
+      socket.on("connect", () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.on("error", () => {
+        socket.destroy();
+        resolve(false);
+      });
+      socket.on("timeout", () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+  } catch {
+    return Promise.resolve(false);
+  }
+}
+
+const isReachable = await checkDatabaseReachable(url);
+
+if (url && isReachable) {
   process.env.DATABASE_URL = url;
+  process.env.TEST_DB_AVAILABLE = "true";
 } else {
   // Config requires DATABASE_URL to parse. Provide a test placeholder when no DB is configured.
   process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/mock_test_db";
+  process.env.TEST_DB_AVAILABLE = "false";
 }
-process.env.TEST_DB_AVAILABLE = hasRealDb ? "true" : "false";
 for (const key of PAID_KEYS) {
   delete process.env[key];
 }

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CalendarDays, Filter, Hash, Target, X } from "lucide-react";
+import { ArrowUpDown, CalendarDays, Filter, Hash, Target, X } from "lucide-react";
 import { FilterPills, type FilterSpec } from "@/components/FilterPills";
 import { atLabel, FEED_WINDOWS, type FeedFacets, type FeedParams } from "@/lib/feed";
 import { withParams } from "@/lib/url";
@@ -80,6 +80,16 @@ export function FeedFilters({ facets, at, params }: FeedFiltersProps) {
       icon: <Filter className={ICON} aria-hidden="true" />,
       fallback: "new",
       options: Object.entries(STATUS_LABELS).map(([value, text]) => ({ value, label: text })),
+    },
+    {
+      name: "order",
+      ariaLabel: "ordering",
+      icon: <ArrowUpDown className={ICON} aria-hidden="true" />,
+      fallback: "score",
+      options: [
+        { value: "score", label: "Score order" },
+        { value: "learned", label: "Learned priority" },
+      ],
     },
   ];
   return (

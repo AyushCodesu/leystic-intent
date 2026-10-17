@@ -24,6 +24,7 @@ import { isOnboarding, type ProjectActivity } from "@/lib/projectActivity";
 import { verdictSentence } from "@/lib/scan/report";
 import { sweepShown, sweepStatus } from "@/lib/sweep";
 import { withParams } from "@/lib/url";
+import { getProjectLearningSnapshot } from "@/lib/learning";
 
 import type { StreamEntry } from "@/components/leads/stream";
 
@@ -172,10 +173,11 @@ export async function Feed({ user, project, activity, params: asked }: FeedProps
   // While the first leads are found, the page asks once whether to send new
   // ones on: the person is already watching, and a project with no channel is
   // only seen when they come back to look.
-  const [sweep, offered, selection] = await Promise.all([
+  const [sweep, offered, selection, learningSnapshot] = await Promise.all([
     shown ? sweepStatus(projectId) : null,
     shown || arriving ? alertsOffer(user.id, projectId, user.email) : null,
     openOn(projectId, entries, held, params.lead),
+    filter.order === "learned" ? getProjectLearningSnapshot(projectId) : null,
   ]);
   // Read beside the sweep, so a sweep that turned out to be gone asks nothing.
   const offer = sweep || arriving ? offered : null;
@@ -210,6 +212,17 @@ export async function Feed({ user, project, activity, params: asked }: FeedProps
           slackInstall={chatAppConfigured("slack")}
           discordInstall={chatAppConfigured("discord")}
         />
+      ) : null}
+      {filter.order === "learned" && learningSnapshot ? (
+        learningSnapshot.enoughEvidenceToPrioritize ? (
+          <div className="rounded-control border border-brand/30 bg-brand-soft/50 px-3 py-2 text-small text-fg">
+            <strong>Learned priority active:</strong> Leads matching your promising outcome patterns are prioritized, and repeated mismatches are deprioritized.
+          </div>
+        ) : (
+          <div className="rounded-control border bg-surface-2 px-3 py-2 text-small text-fg-muted">
+            <strong>Learned priority requires more evidence:</strong> Needs at least 5 labelled leads and 5 terminal outcomes before it can activate (currently {learningSnapshot.labelledLeadCount}/5 labelled, {learningSnapshot.terminalOutcomeCount}/5 terminal outcomes). Showing standard score order.
+          </div>
+        )
       ) : null}
       {/* The pills ride in the strip's top line, so the two cost one row between them. */}
       {arriving && total === 0 ? null : (

@@ -136,6 +136,8 @@ export function LeadPages({ projectId, search, initialRows, total, selectedId }:
           subredditIconUrl={row.subredditIconUrl}
           createdAt={row.createdAt}
           trailing={<VerdictBadge fit={row.fit} intent={row.intent} />}
+          learnedTier={row.learnedTier}
+          learnedExplanation={row.learnedExplanation}
         />
       ))}
       {whole ? null : (
