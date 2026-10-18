@@ -465,6 +465,48 @@ Eliminate negation and staying-intent false positives in competitor switching cl
 * `npm run typecheck`: 0 errors.
 * `npm run lint`: 0 problems (0 errors, 0 warnings).
 * `npm run test`: 82 test files passed, 766 tests passed, 278 skipped (database suites), 0 failures.
-* `npm run build`: Next.js Turbopack build succeeded with 0 errors.
-* `npm run eval:competitors`: Evaluated benchmark with complete provenance, SHA-256 prompt hash, and confusion reporting.
 * `tests/typography.test.ts`: 0 unicode em-dashes or en-dashes across `src/`.
+
+---
+
+## 13. P0: Evidence-Aware Switching Guard and Live-Evaluation Integrity
+
+**Date**: October 2026  
+**Commit Target**: `fix: make switching classification evidence-aware and eliminate mixed live evaluation`
+
+### 1. Objective
+Separate string token normalization from post evidence verification so that model-proposed switching verdicts (`actively_switching`, `evaluating_alternatives`) are checked against the candidate's actual title and body, and eliminate silent fallback or mixed predictions in the evaluation harness under `--live`.
+
+### 2. Evidence-Aware Switching Guard (`src/lib/competitors/classify.ts`)
+* **Separation of Concerns**:
+  * `switchingEvidenceSchema` normalizes aliases and rejects unsupported tokens.
+  * `guardSwitchingEvidence` inspects candidate post text (`title` and `body`) after inference to confirm or correct proposed switching labels.
+* **Conservative Switching Protection**:
+  * Posts where authors express inability to switch, compliance approval constraints, integration lock-in ("too many integrations to ever leave", "integration lock-in"), or explicit intent to stay ("staying despite the issues", "not switching", "not leaving") are prevented from becoming `actively_switching` or `evaluating_alternatives`.
+  * If dissatisfaction is present, mapped to `dissatisfied_no_switch`.
+  * If dissatisfaction is absent (e.g. neutral informational questions like "Does Typeform support webhooks? Not switching, just asking"), mapped to `no_clear_signal`.
+* **Preserving Valid Signals**:
+  * Explicit current switching ("migrating away now", "cancelled our subscription", "we are dumping Formstack") is preserved and not suppressed by historical inability ("could not switch last year") or unrelated uses of "staying" ("staying up late", "sister company is staying").
+  * Genuine queries seeking alternatives ("Is there any good alternative to Jotform?") retain `evaluating_alternatives`.
+
+### 3. Evaluation Harness Integrity (`scripts/eval-competitor-reasons.ts`, `tests/competitorReasonsEval.test.ts`)
+* **No Silent Fallback or Mixed Predictions**:
+  * When invoked with `--live`, `runLiveEvaluation()` requires an active `OPENROUTER_API_KEY` and reachable database with a project row. If missing, it immediately aborts with a descriptive error and exit code 1 instead of silently substituting recorded benchmark outputs.
+  * Live evaluations score only fresh model predictions and report candidate coverage explicitly (`classifiedCount / totalCandidates`). Missing predictions are never backfilled with benchmark fixtures.
+* **Dynamic Evaluation Metadata**:
+  * Evaluation timestamp dynamically generated (`new Date().toISOString()`) rather than frozen static text.
+  * Provider and model dynamically read from environment/config (`process.env.OPENROUTER_MODEL || "meta/muse-spark-1.3-contributor"`).
+* **Test Verification**:
+  * Added unit tests in `tests/competitorReasonsEval.test.ts` asserting that `runLiveEvaluation()` rejects cleanly when prerequisites are missing and never resolves with fixture data.
+
+### 4. Verification Results
+* `tests/competitors.test.ts`: 55 tests passed (100%), including unit tests for `guardSwitchingEvidence` and end-to-end `classifyMentions` mock production pipelines.
+* `tests/competitorReasonsEval.test.ts`: 6 tests passed (100%), verifying static benchmark scoring and clean failure without live prerequisites.
+* `npm run eval:competitors`: Evaluates 28-sample offline benchmark dataset cleanly.
+* `npm run eval:competitors -- --live`: Aborts cleanly with clear error banner and exit code 1 when live prerequisites are absent, refusing to display fixtures as live results.
+* `npm run typecheck`: 0 errors.
+* `npm run lint`: 0 problems (0 errors, 0 warnings).
+* `npm run test`: 82 test files passed (785 tests passed, 278 skipped database tests), 0 failures.
+* `npm run build`: Production build succeeded with Next.js Turbopack.
+* Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all modified files.
+

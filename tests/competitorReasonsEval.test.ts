@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { runEvaluation, verifyThreadDeduplication } from "../scripts/eval-competitor-reasons";
+import {
+  runEvaluation,
+  runLiveEvaluation,
+  verifyThreadDeduplication,
+} from "../scripts/eval-competitor-reasons";
 
 describe("competitor reasons evaluation harness and fixture regression checks", () => {
   const metrics = runEvaluation();
@@ -39,5 +43,35 @@ describe("competitor reasons evaluation harness and fixture regression checks", 
     // Switcher opportunities in a thread are unified into one card
     expect(dedup.switcherDeduplication.totalFound).toBe(1);
     expect(dedup.switcherDeduplication.signal).toBe("actively_switching");
+  });
+
+  it("asserts that live evaluation fails cleanly without prerequisites and does not fall back to fixture data", async () => {
+    const origKey = process.env.OPENROUTER_API_KEY;
+    try {
+      delete process.env.OPENROUTER_API_KEY;
+      await expect(runLiveEvaluation()).rejects.toThrow(
+        /prerequisite failed: OPENROUTER_API_KEY is not configured/i,
+      );
+    } finally {
+      if (origKey !== undefined) {
+        process.env.OPENROUTER_API_KEY = origKey;
+      }
+    }
+  });
+
+  it("asserts that live evaluation fails cleanly when database is unreachable and does not fall back to fixture data", async () => {
+    const origKey = process.env.OPENROUTER_API_KEY;
+    try {
+      process.env.OPENROUTER_API_KEY = "test-key";
+      await expect(runLiveEvaluation()).rejects.toThrow(
+        /prerequisite failed: Database/i,
+      );
+    } finally {
+      if (origKey !== undefined) {
+        process.env.OPENROUTER_API_KEY = origKey;
+      } else {
+        delete process.env.OPENROUTER_API_KEY;
+      }
+    }
   });
 });

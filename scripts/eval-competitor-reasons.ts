@@ -960,110 +960,158 @@ export function verifyThreadDeduplication() {
   };
 }
 
-export async function runLiveEvaluation(): Promise<{
+export type LiveEvaluationResult = {
   results: EvalExample[];
-  liveExecuted: boolean;
-  notes: string;
-}> {
+  liveExecuted: true;
+  totalCandidates: number;
+  classifiedCount: number;
+  coverageRatio: number;
+  evaluatedAt: string;
+  provider: string;
+  model: string;
+};
+
+export async function runLiveEvaluation(): Promise<LiveEvaluationResult> {
   if (existsSync(".env")) {
     process.loadEnvFile(".env");
   }
 
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
-    return {
-      results: HELD_OUT_DATASET,
-      liveExecuted: false,
-      notes: "OPENROUTER_API_KEY not configured. Falling back to recorded benchmark outputs.",
-    };
+    throw new Error(
+      "Live evaluation prerequisite failed: OPENROUTER_API_KEY is not configured. Live evaluation requires an active OpenRouter API key and refuses to fall back to recorded benchmark outputs.",
+    );
   }
 
+  const { db } = await import("../src/db");
+  const { projects } = await import("../src/db/schema");
+  let local: { id: string } | undefined;
   try {
-    const { db } = await import("../src/db");
-    const { projects } = await import("../src/db/schema");
-    const [local] = await db().select({ id: projects.id }).from(projects).limit(1);
-    if (!local) {
-      return {
-        results: HELD_OUT_DATASET,
-        liveExecuted: false,
-        notes: "Local database has no project row to record usage. Falling back to recorded benchmark outputs.",
-      };
-    }
-
-    const byCompetitor = new Map<string, EvalExample[]>();
-    for (const item of HELD_OUT_DATASET) {
-      const list = byCompetitor.get(item.competitor) ?? [];
-      list.push(item);
-      byCompetitor.set(item.competitor, list);
-    }
-
-    const liveDataset: EvalExample[] = [];
-    for (const [competitor, items] of byCompetitor) {
-      const candidates: MentionCandidate[] = items.map((item) => ({
-        id: item.id,
-        title: `Post about ${competitor}`,
-        subreddit: "SaaS",
-        body: item.text,
-      }));
-
-      const verdicts = await classifyMentions(local.id, competitor, candidates);
-      for (const item of items) {
-        const verdict = verdicts.get(item.id);
-        if (verdict) {
-          liveDataset.push({
-            ...item,
-            prediction: {
-              sentiment: verdict.sentiment,
-              reasonCategory: verdict.reasonCategory,
-              switchingEvidence: verdict.switchingEvidence,
-              explanation: verdict.explanation,
-            },
-          });
-        } else {
-          liveDataset.push(item);
-        }
-      }
-    }
-
-    return {
-      results: liveDataset,
-      liveExecuted: true,
-      notes: "Live model evaluation executed successfully against OpenRouter.",
-    };
-  } catch (err) {
-    return {
-      results: HELD_OUT_DATASET,
-      liveExecuted: false,
-      notes: `Live evaluation fallback: ${err instanceof Error ? err.message : String(err)}`,
-    };
+    const rows = await db().select({ id: projects.id }).from(projects).limit(1);
+    local = rows[0];
+  } catch (dbErr) {
+    throw new Error(
+      `Live evaluation prerequisite failed: Database unreachable (${dbErr instanceof Error ? dbErr.message : String(dbErr)}). Live evaluation requires a reachable local database with a project row.`,
+    );
   }
+
+  if (!local) {
+    throw new Error(
+      "Live evaluation prerequisite failed: Database has no project row to record usage. Live evaluation requires at least one project in the database.",
+    );
+  }
+
+  const provider = "OpenRouter";
+  const model = process.env.OPENROUTER_MODEL || "meta/muse-spark-1.3-contributor";
+
+  const byCompetitor = new Map<string, EvalExample[]>();
+  for (const item of HELD_OUT_DATASET) {
+    const list = byCompetitor.get(item.competitor) ?? [];
+    list.push(item);
+    byCompetitor.set(item.competitor, list);
+  }
+
+  const liveDataset: EvalExample[] = [];
+  for (const [competitor, items] of byCompetitor) {
+    const candidates: MentionCandidate[] = items.map((item) => ({
+      id: item.id,
+      title: `Post about ${competitor}`,
+      subreddit: "SaaS",
+      body: item.text,
+    }));
+
+    const verdicts = await classifyMentions(local.id, competitor, candidates);
+    for (const item of items) {
+      const verdict = verdicts.get(item.id);
+      if (verdict) {
+        liveDataset.push({
+          ...item,
+          prediction: {
+            sentiment: verdict.sentiment,
+            reasonCategory: verdict.reasonCategory,
+            switchingEvidence: verdict.switchingEvidence,
+            explanation: verdict.explanation,
+          },
+        });
+      }
+      // Items without fresh verdicts are intentionally excluded to avoid mixing with recorded fixtures
+    }
+  }
+
+  if (liveDataset.length === 0) {
+    throw new Error(
+      "Live evaluation failed: Model returned zero classified mentions. No fresh predictions available to score.",
+    );
+  }
+
+  const totalCandidates = HELD_OUT_DATASET.length;
+  const classifiedCount = liveDataset.length;
+  const coverageRatio = classifiedCount / totalCandidates;
+  const evaluatedAt = new Date().toISOString();
+
+  return {
+    results: liveDataset,
+    liveExecuted: true,
+    totalCandidates,
+    classifiedCount,
+    coverageRatio,
+    evaluatedAt,
+    provider,
+    model,
+  };
 }
 
 if (process.argv[1]?.endsWith("eval-competitor-reasons.ts")) {
   const isLive = process.argv.includes("--live");
   let dataset = HELD_OUT_DATASET;
-  let executionMode = "Offline recorded benchmark outputs";
+  let metadata = { ...EVALUATION_METADATA };
+  let executionMode = "Recorded benchmark outputs (offline fixtures)";
+  let coverageInfo: string | null = null;
 
   if (isLive) {
-    const liveRun = await runLiveEvaluation();
-    dataset = liveRun.results;
-    executionMode = liveRun.liveExecuted
-      ? `Live model inference (${liveRun.notes})`
-      : `Fallback to recorded outputs (${liveRun.notes})`;
+    try {
+      const liveRun = await runLiveEvaluation();
+      dataset = liveRun.results;
+      metadata = {
+        provider: liveRun.provider,
+        model: liveRun.model,
+        promptVersion: CLASSIFIER_PROMPT_VERSION,
+        promptHash: getPromptHash(),
+        evaluationDate: liveRun.evaluatedAt,
+        datasetProvenance: DATASET_PROVENANCE,
+        sampleSize: liveRun.classifiedCount,
+      };
+      executionMode = "Live model inference";
+      coverageInfo = `Coverage:                  ${liveRun.classifiedCount}/${liveRun.totalCandidates} candidates classified (${(liveRun.coverageRatio * 100).toFixed(1)}%)`;
+    } catch (err) {
+      console.error("=================================================");
+      console.error("LIVE EVALUATION ABORTED: PREREQUISITE MISSING");
+      console.error("=================================================");
+      console.error(err instanceof Error ? err.message : String(err));
+      console.error("\nRefusing to display recorded benchmark fixtures as live metrics.");
+      process.exit(1);
+    }
   }
 
   const metrics = runEvaluation(dataset);
   const dedup = verifyThreadDeduplication();
 
   console.log("=================================================");
-  console.log("COMPETITOR REASONS V1: HELD-OUT BENCHMARK EVAL");
+  console.log(
+    isLive
+      ? "COMPETITOR REASONS V1: LIVE MODEL EVALUATION"
+      : "COMPETITOR REASONS V1: HELD-OUT BENCHMARK EVAL (RECORDED FIXTURES)",
+  );
   console.log("=================================================");
-  console.log(`Provenance:                ${EVALUATION_METADATA.datasetProvenance}`);
-  console.log(`Model / Provider:          ${EVALUATION_METADATA.model} (${EVALUATION_METADATA.provider})`);
-  console.log(`Classifier Prompt Version: ${EVALUATION_METADATA.promptVersion}`);
-  console.log(`Classifier Prompt Hash:    ${EVALUATION_METADATA.promptHash}`);
-  console.log(`Evaluation Date:           ${EVALUATION_METADATA.evaluationDate}`);
+  console.log(`Provenance:                ${metadata.datasetProvenance}`);
+  console.log(`Model / Provider:          ${metadata.model} (${metadata.provider})`);
+  console.log(`Classifier Prompt Version: ${metadata.promptVersion}`);
+  console.log(`Classifier Prompt Hash:    ${metadata.promptHash}`);
+  console.log(`Evaluation Date:           ${metadata.evaluationDate}`);
   console.log(`Execution Mode:            ${executionMode}`);
+  if (coverageInfo) {
+    console.log(coverageInfo);
+  }
   console.log(`Sample Size:               ${metrics.sampleSize} synthetic conversations across 6 competitors`);
   console.log("\n--- EXPLICIT SWITCHING INTENT ---");
   console.log(`True Positives (TP):  ${metrics.switching.truePositives}`);

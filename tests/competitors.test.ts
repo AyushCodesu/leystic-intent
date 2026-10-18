@@ -18,6 +18,7 @@ const {
 } = await import("@/lib/competitors/read");
 const {
   classifyMentions,
+  guardSwitchingEvidence,
   reasonCategorySchema,
   switchingEvidenceSchema,
 } = await import("@/lib/competitors/classify");
@@ -112,7 +113,7 @@ describe("sentiment classification", () => {
       ],
     });
     const verdicts = await classifyMentions("project-1", "Typeform", [
-      { id: "p1", title: "Done with it", subreddit: "SaaS", body: "the new price" },
+      { id: "p1", title: "Done with it", subreddit: "SaaS", body: "we are switching away over the new price" },
       { id: "p2", title: "Works well", subreddit: "SaaS", body: "happy" },
     ]);
     expect(generateStructured.mock.calls[0][0].purpose).toBe("competitors");
@@ -250,6 +251,428 @@ describe("reason category schema normalization", () => {
     expect(reasonCategorySchema.parse(null)).toBe("unknown");
     expect(reasonCategorySchema.parse(undefined)).toBe("unknown");
     expect(reasonCategorySchema.parse(42)).toBe("unknown");
+  });
+});
+
+describe("evidence-aware guard against candidate post text (guardSwitchingEvidence)", () => {
+  it("guards compliance lock-in and maps to dissatisfied_no_switch", () => {
+    const candidate = {
+      title: "Typeform compliance approval",
+      body: "Typeform has been frustrating and slow, but we cannot switch because our compliance team approved it.",
+    };
+    const guarded = guardSwitchingEvidence(
+      candidate,
+      { sentiment: "negative", reasonCategory: "usability", switchingEvidence: "actively_switching" },
+      "Typeform",
+    );
+    expect(guarded).toBe("dissatisfied_no_switch");
+  });
+
+  it("guards explicit not switching and not leaving when dissatisfaction is present", () => {
+    const candidate1 = {
+      title: "Pricing is terrible",
+      body: "The new pricing is awful, but we are not switching any time soon.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidate1,
+        { sentiment: "negative", reasonCategory: "pricing_value", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("dissatisfied_no_switch");
+
+    const candidate2 = {
+      title: "Constant bugs",
+      body: "We hate the recent bugs, but we are not leaving.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidate2,
+        { sentiment: "negative", reasonCategory: "reliability", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("dissatisfied_no_switch");
+  });
+
+  it("guards staying despite the issues", () => {
+    const candidate = {
+      title: "Outages every week",
+      body: "We are staying despite the issues because our team knows how to work around them.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidate,
+        { sentiment: "negative", reasonCategory: "reliability", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("dissatisfied_no_switch");
+  });
+
+  it("guards broad integration lock-in without migration evidence", () => {
+    const candidate = {
+      title: "Zapier dependencies",
+      body: "We have too many integrations to ever leave Typeform, despite their terrible customer support.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidate,
+        { sentiment: "negative", reasonCategory: "support", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("dissatisfied_no_switch");
+
+    const candidate2 = {
+      title: "Integration lock-in",
+      body: "Typeform is expensive and broken, but our integration lock-in prevents any migration.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidate2,
+        { sentiment: "negative", reasonCategory: "pricing_value", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("dissatisfied_no_switch");
+  });
+
+  it("preserves actively_switching when historical inability is mentioned alongside current migration", () => {
+    const candidate = {
+      title: "Finally moving",
+      body: "We could not switch last year due to vendor lock-in, but we are migrating away now.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidate,
+        { sentiment: "negative", reasonCategory: "pricing_value", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("actively_switching");
+  });
+
+  it("preserves actively_switching when staying is used in unrelated context", () => {
+    const candidate1 = {
+      title: "Late night debugging",
+      body: "I was staying up late fixing Typeform form errors, so we cancelled our subscription yesterday.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidate1,
+        { sentiment: "negative", reasonCategory: "reliability", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("actively_switching");
+
+    const candidate2 = {
+      title: "Org split",
+      body: "Our sister company is staying with Typeform, but we are migrating away to Jotform this week.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidate2,
+        { sentiment: "negative", reasonCategory: "pricing_value", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("actively_switching");
+  });
+
+  it("preserves evaluating_alternatives for genuine alternative searches", () => {
+    const candidate = {
+      title: "Looking for recommendations",
+      body: "Is there any good alternative to Jotform? Their builder has become slow and clunky.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidate,
+        { sentiment: "negative", reasonCategory: "usability", switchingEvidence: "evaluating_alternatives" },
+        "Jotform",
+      ),
+    ).toBe("evaluating_alternatives");
+  });
+
+  it("maps neutral informational queries lacking dissatisfaction to no_clear_signal", () => {
+    const candidate = {
+      title: "Webhook support query",
+      body: "Does Typeform support webhooks? Not switching, just asking for a client project.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidate,
+        { sentiment: "neutral", reasonCategory: "unknown", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("no_clear_signal");
+  });
+
+  it("distinguishes schema parsing from candidate evidence guarding", () => {
+    // Schema parsing only checks the returned token/alias string in isolation
+    expect(switchingEvidenceSchema.parse("actively_switching")).toBe("actively_switching");
+    expect(switchingEvidenceSchema.parse("not switching")).toBe("no_clear_signal");
+
+    // But candidate evidence guarding protects against model hallucinating actively_switching on staying text
+    const stayingCandidate = {
+      title: "Stuck with tool",
+      body: "We hate the pricing, but we cannot switch because our compliance team approved it.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        stayingCandidate,
+        { sentiment: "negative", reasonCategory: "pricing_value", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("dissatisfied_no_switch");
+  });
+});
+
+describe("production classifyMentions evidence-aware switching guard", () => {
+  beforeEach(() => {
+    generateStructured.mockReset();
+  });
+
+  it("overrides model-proposed actively_switching to dissatisfied_no_switch for compliance lock-in", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-compliance",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Frustrated with Typeform but locked in by compliance",
+          reasonCategory: "usability",
+          switchingEvidence: "actively_switching",
+          explanation: "Author is unhappy but compliance approved it",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Typeform", [
+      {
+        id: "m-compliance",
+        title: "Compliance approval",
+        subreddit: "SaaS",
+        body: "Typeform has been frustrating and slow, but we cannot switch because our compliance team approved it.",
+      },
+    ]);
+
+    expect(verdicts.get("m-compliance")?.switchingEvidence).toBe("dissatisfied_no_switch");
+  });
+
+  it("overrides model-proposed actively_switching when author is not switching or not leaving", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-notswitch",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Unhappy with pricing",
+          reasonCategory: "pricing_value",
+          switchingEvidence: "actively_switching",
+          explanation: "Dislikes pricing",
+        },
+        {
+          id: "m-notleave",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Unhappy with bugs",
+          reasonCategory: "reliability",
+          switchingEvidence: "actively_switching",
+          explanation: "Dislikes bugs",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Typeform", [
+      {
+        id: "m-notswitch",
+        title: "Expensive tier",
+        subreddit: "SaaS",
+        body: "The new pricing is awful, but we are not switching any time soon.",
+      },
+      {
+        id: "m-notleave",
+        title: "Annoying bugs",
+        subreddit: "SaaS",
+        body: "We hate the recent bugs, but we are not leaving.",
+      },
+    ]);
+
+    expect(verdicts.get("m-notswitch")?.switchingEvidence).toBe("dissatisfied_no_switch");
+    expect(verdicts.get("m-notleave")?.switchingEvidence).toBe("dissatisfied_no_switch");
+  });
+
+  it("overrides model-proposed actively_switching when staying despite the issues", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-staying",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Staying despite issues",
+          reasonCategory: "reliability",
+          switchingEvidence: "actively_switching",
+          explanation: "Staying despite outages",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Typeform", [
+      {
+        id: "m-staying",
+        title: "Frequent downtime",
+        subreddit: "SaaS",
+        body: "We are staying despite the issues because our team knows the workarounds.",
+      },
+    ]);
+
+    expect(verdicts.get("m-staying")?.switchingEvidence).toBe("dissatisfied_no_switch");
+  });
+
+  it("overrides model-proposed actively_switching for broad integration lock-in", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-integrations",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Too many integrations to leave",
+          reasonCategory: "support",
+          switchingEvidence: "actively_switching",
+          explanation: "Locked in by Zapier",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Typeform", [
+      {
+        id: "m-integrations",
+        title: "Too many connections",
+        subreddit: "SaaS",
+        body: "We have too many integrations to ever leave Typeform, despite their terrible support.",
+      },
+    ]);
+
+    expect(verdicts.get("m-integrations")?.switchingEvidence).toBe("dissatisfied_no_switch");
+  });
+
+  it("preserves actively_switching on explicit current switch with historical inability", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-historical",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Migrating away now",
+          reasonCategory: "pricing_value",
+          switchingEvidence: "actively_switching",
+          explanation: "Migrating away after past inability",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Typeform", [
+      {
+        id: "m-historical",
+        title: "Finally migrating",
+        subreddit: "SaaS",
+        body: "We could not switch last year due to vendor lock-in, but we are migrating away now.",
+      },
+    ]);
+
+    expect(verdicts.get("m-historical")?.switchingEvidence).toBe("actively_switching");
+  });
+
+  it("preserves actively_switching on unrelated staying mentions", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-staying-up",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Cancelled subscription after late night debugging",
+          reasonCategory: "reliability",
+          switchingEvidence: "actively_switching",
+          explanation: "Cancelled subscription",
+        },
+        {
+          id: "m-sister-company",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Migrating away while sister company stays",
+          reasonCategory: "pricing_value",
+          switchingEvidence: "actively_switching",
+          explanation: "Migrating to Jotform",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Typeform", [
+      {
+        id: "m-staying-up",
+        title: "Late night bug fixing",
+        subreddit: "SaaS",
+        body: "I was staying up late fixing Typeform form errors, so we cancelled our subscription yesterday.",
+      },
+      {
+        id: "m-sister-company",
+        title: "Different divisions",
+        subreddit: "SaaS",
+        body: "Our sister company is staying with Typeform, but we are migrating away to Jotform this week.",
+      },
+    ]);
+
+    expect(verdicts.get("m-staying-up")?.switchingEvidence).toBe("actively_switching");
+    expect(verdicts.get("m-sister-company")?.switchingEvidence).toBe("actively_switching");
+  });
+
+  it("preserves evaluating_alternatives for genuine alternative searches", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-eval-alt",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Looking for Jotform alternative",
+          reasonCategory: "usability",
+          switchingEvidence: "evaluating_alternatives",
+          explanation: "Seeking alternative because builder is slow",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Jotform", [
+      {
+        id: "m-eval-alt",
+        title: "Need recommendations",
+        subreddit: "SaaS",
+        body: "Is there any good alternative to Jotform? Their form builder is way too slow and clunky.",
+      },
+    ]);
+
+    expect(verdicts.get("m-eval-alt")?.switchingEvidence).toBe("evaluating_alternatives");
+  });
+
+  it("overrides model-proposed actively_switching to no_clear_signal on neutral query lacking dissatisfaction", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-neutral-query",
+          about: "the_product",
+          sentiment: "neutral",
+          summary: "Querying webhook support",
+          reasonCategory: "unknown",
+          switchingEvidence: "actively_switching",
+          explanation: "User asked about webhooks",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Typeform", [
+      {
+        id: "m-neutral-query",
+        title: "Webhook support query",
+        subreddit: "SaaS",
+        body: "Does Typeform support webhooks? Not switching, just asking for a client project.",
+      },
+    ]);
+
+    expect(verdicts.get("m-neutral-query")?.switchingEvidence).toBe("no_clear_signal");
   });
 });
 
