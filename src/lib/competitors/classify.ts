@@ -55,33 +55,219 @@ export const SWITCHING_EVIDENCE_LABELS: Record<SwitchingEvidence, string> = {
   no_clear_signal: "No clear signal",
 };
 
+const NEGATION_PATTERNS: readonly RegExp[] = [
+  /\bnot\s+(?:actively\s+)?(?:switching|leaving|moving)\b/i,
+  /\b(?:cannot|can't|cant|won't|wont|never)\s+(?:switch|leave|move)\b/i,
+  /\bstaying\b/i,
+  /\bno\s+switch\b/i,
+  /\bwill\s+not\s+(?:switch|leave)\b/i,
+];
+
+const SWITCHING_ALIAS_MAP: Record<string, SwitchingEvidence> = {
+  actively_switching: "actively_switching",
+  "actively switching": "actively_switching",
+  active_switching: "actively_switching",
+  "active switching": "actively_switching",
+  migrating: "actively_switching",
+  "migrating away": "actively_switching",
+  "migrating off": "actively_switching",
+  migrated: "actively_switching",
+  "migrated away": "actively_switching",
+  cancelled: "actively_switching",
+  canceled: "actively_switching",
+  "cancelled subscription": "actively_switching",
+  "canceled subscription": "actively_switching",
+  "cancelled our subscription": "actively_switching",
+  "canceled our subscription": "actively_switching",
+  "cancelling subscription": "actively_switching",
+  "canceling subscription": "actively_switching",
+  "switching away": "actively_switching",
+  switched: "actively_switching",
+  dumping: "actively_switching",
+  "migrated to another tool": "actively_switching",
+
+  evaluating_alternatives: "evaluating_alternatives",
+  "evaluating alternatives": "evaluating_alternatives",
+  evaluating_alternative: "evaluating_alternatives",
+  "evaluating alternative": "evaluating_alternatives",
+  "evaluating options": "evaluating_alternatives",
+  "looking for alternatives": "evaluating_alternatives",
+  "looking for alternative": "evaluating_alternatives",
+  "looking for replacement": "evaluating_alternatives",
+  "looking for replacements": "evaluating_alternatives",
+  "seeking alternatives": "evaluating_alternatives",
+  "seeking alternative": "evaluating_alternatives",
+  "considering alternatives": "evaluating_alternatives",
+  "considering alternative": "evaluating_alternatives",
+  "considering replacement": "evaluating_alternatives",
+  "alternative sought": "evaluating_alternatives",
+  "exploring alternatives": "evaluating_alternatives",
+
+  dissatisfied_no_switch: "dissatisfied_no_switch",
+  "dissatisfied no switch": "dissatisfied_no_switch",
+  "dissatisfied without switching evidence": "dissatisfied_no_switch",
+  "dissatisfied without switching": "dissatisfied_no_switch",
+  dissatisfied: "dissatisfied_no_switch",
+  complaint: "dissatisfied_no_switch",
+  "frustrated without switching": "dissatisfied_no_switch",
+  "frustrated with bug": "dissatisfied_no_switch",
+
+  positive_recommendation: "positive_recommendation",
+  "positive recommendation": "positive_recommendation",
+  "positive recommendation / satisfaction": "positive_recommendation",
+  "positive recommendation satisfaction": "positive_recommendation",
+  recommendation: "positive_recommendation",
+  satisfaction: "positive_recommendation",
+  satisfied: "positive_recommendation",
+  "recommends product": "positive_recommendation",
+
+  no_clear_signal: "no_clear_signal",
+  "no clear signal": "no_clear_signal",
+  "no signal": "no_clear_signal",
+  unknown: "no_clear_signal",
+  unclear: "no_clear_signal",
+  neutral: "no_clear_signal",
+  none: "no_clear_signal",
+};
+
+const REASON_ALIAS_MAP: Record<string, ReasonCategory> = {
+  pricing_value: "pricing_value",
+  "pricing value": "pricing_value",
+  "pricing / value": "pricing_value",
+  pricing: "pricing_value",
+  price: "pricing_value",
+  cost: "pricing_value",
+  expensive: "pricing_value",
+  "pricing tiers": "pricing_value",
+
+  missing_capability: "missing_capability",
+  "missing capability": "missing_capability",
+  "missing feature": "missing_capability",
+  "capability limitation": "missing_capability",
+  "feature limitation": "missing_capability",
+
+  usability: "usability",
+  ui: "usability",
+  ux: "usability",
+  "user experience": "usability",
+  "complex ux": "usability",
+  "confusing workflow": "usability",
+  "clunky ui": "usability",
+  "ease of use": "usability",
+
+  reliability: "reliability",
+  uptime: "reliability",
+  downtime: "reliability",
+  bugs: "reliability",
+  bug: "reliability",
+  outage: "reliability",
+  "data loss": "reliability",
+  crash: "reliability",
+
+  performance: "performance",
+  speed: "performance",
+  slow: "performance",
+  latency: "performance",
+  "load time": "performance",
+  fast: "performance",
+  lag: "performance",
+
+  integrations: "integrations",
+  integration: "integrations",
+  api: "integrations",
+  webhook: "integrations",
+  webhooks: "integrations",
+  zapier: "integrations",
+  "hubspot sync": "integrations",
+
+  support: "support",
+  "customer service": "support",
+  "customer support": "support",
+  "ticket response": "support",
+  documentation: "support",
+
+  recommendation_value_delivered: "recommendation_value_delivered",
+  "recommendation / value delivered": "recommendation_value_delivered",
+  "recommendation value delivered": "recommendation_value_delivered",
+  "value delivered": "recommendation_value_delivered",
+  recommendation: "recommendation_value_delivered",
+  endorsement: "recommendation_value_delivered",
+
+  other: "other",
+  unknown: "unknown",
+  none: "unknown",
+  unclear: "unknown",
+};
+
 export const reasonCategorySchema = z.preprocess((val) => {
   if (typeof val !== "string") return "unknown";
-  const raw = val.trim().toLowerCase();
-  const normalized = raw.replace(/[\s\/-]+/g, "_");
-  if (REASON_CATEGORIES.includes(normalized as ReasonCategory)) return normalized;
-  if (normalized.includes("pricing") || normalized.includes("price") || normalized.includes("cost") || normalized.includes("tier")) return "pricing_value";
-  if (normalized.includes("missing") || normalized.includes("feature") || normalized.includes("capability") || normalized.includes("limitation")) return "missing_capability";
-  if (normalized.includes("usab") || normalized.includes("ux") || normalized.includes("ui") || normalized.includes("complex") || normalized.includes("confus") || normalized.includes("ease")) return "usability";
-  if (normalized.includes("reliab") || normalized.includes("bug") || normalized.includes("down") || normalized.includes("crash") || normalized.includes("break")) return "reliability";
-  if (normalized.includes("perform") || normalized.includes("slow") || normalized.includes("speed") || normalized.includes("lag") || normalized.includes("fast")) return "performance";
-  if (normalized.includes("integrat") || normalized.includes("api") || normalized.includes("webhook") || normalized.includes("connect")) return "integrations";
-  if (normalized.includes("support") || normalized.includes("service") || normalized.includes("ticket") || normalized.includes("help") || normalized.includes("doc")) return "support";
-  if (normalized.includes("recommend") || normalized.includes("value") || normalized.includes("love") || normalized.includes("praise") || normalized.includes("great") || normalized.includes("good")) return "recommendation_value_delivered";
-  if (normalized.includes("other")) return "other";
+  const cleaned = val.trim().toLowerCase().replace(/\s+/g, " ");
+  if (REASON_CATEGORIES.includes(cleaned as ReasonCategory)) {
+    return cleaned as ReasonCategory;
+  }
+  const snake = cleaned.replace(/[\s\/-]+/g, "_");
+  if (REASON_CATEGORIES.includes(snake as ReasonCategory)) {
+    return snake as ReasonCategory;
+  }
+  if (cleaned in REASON_ALIAS_MAP) {
+    return REASON_ALIAS_MAP[cleaned];
+  }
+  if (snake in REASON_ALIAS_MAP) {
+    return REASON_ALIAS_MAP[snake];
+  }
+  if (/\b(?:pricing|price|cost|expensive|tiers?)\b/i.test(cleaned)) {
+    return "pricing_value";
+  }
+  if (/\b(?:missing|features?|capabilities?|limitations?)\b/i.test(cleaned)) {
+    return "missing_capability";
+  }
+  if (/\b(?:usability|ux|ui|complex|confusing|confuse|clunky|flow|ease)\b/i.test(cleaned)) {
+    return "usability";
+  }
+  if (/\b(?:reliability|bugs?|downtime|crashes?|crash|break|breaks|outages?|uptime)\b/i.test(cleaned)) {
+    return "reliability";
+  }
+  if (/\b(?:performance|slow|speed|lag|fast|latency)\b/i.test(cleaned)) {
+    return "performance";
+  }
+  if (/\b(?:integrations?|api|webhooks?|connect|sync|zapier)\b/i.test(cleaned)) {
+    return "integrations";
+  }
+  if (/\b(?:support|customer service|tickets?|helpdesk|documentation)\b/i.test(cleaned)) {
+    return "support";
+  }
+  if (/\b(?:recommend|recommends|recommendation|love|praise|great tool|endorse|endorsement)\b/i.test(cleaned)) {
+    return "recommendation_value_delivered";
+  }
+  if (/\bother\b/i.test(cleaned)) {
+    return "other";
+  }
   return "unknown";
 }, z.enum(REASON_CATEGORIES));
 
 export const switchingEvidenceSchema = z.preprocess((val) => {
   if (typeof val !== "string") return "no_clear_signal";
-  const raw = val.trim().toLowerCase();
-  const normalized = raw.replace(/[\s\/-]+/g, "_");
-  if (SWITCHING_EVIDENCE.includes(normalized as SwitchingEvidence)) return normalized;
-  if (normalized.includes("actively_switch") || normalized.includes("switching") || normalized.includes("left") || normalized.includes("cancelled") || normalized.includes("migrat")) return "actively_switching";
-  if (normalized.includes("evaluating") || normalized.includes("alternative") || normalized.includes("looking_for") || normalized.includes("replac") || normalized.includes("considering")) return "evaluating_alternatives";
-  if (normalized.includes("dissatisfied") || normalized.includes("complaint") || normalized.includes("frustrat") || normalized.includes("annoy") || normalized.includes("hate") || normalized.includes("bad")) return "dissatisfied_no_switch";
-  if (normalized.includes("positive") || normalized.includes("recommend") || normalized.includes("happy") || normalized.includes("satisf")) return "positive_recommendation";
-  if (normalized.includes("no_clear") || normalized.includes("none") || normalized.includes("unknown") || normalized.includes("neutral")) return "no_clear_signal";
+  const cleaned = val.trim().toLowerCase().replace(/\s+/g, " ");
+
+  for (const pattern of NEGATION_PATTERNS) {
+    if (pattern.test(cleaned)) {
+      return "no_clear_signal";
+    }
+  }
+
+  if (SWITCHING_EVIDENCE.includes(cleaned as SwitchingEvidence)) {
+    return cleaned as SwitchingEvidence;
+  }
+  const snake = cleaned.replace(/[\s\/-]+/g, "_");
+  if (SWITCHING_EVIDENCE.includes(snake as SwitchingEvidence)) {
+    return snake as SwitchingEvidence;
+  }
+  if (cleaned in SWITCHING_ALIAS_MAP) {
+    return SWITCHING_ALIAS_MAP[cleaned];
+  }
+  if (snake in SWITCHING_ALIAS_MAP) {
+    return SWITCHING_ALIAS_MAP[snake];
+  }
   return "no_clear_signal";
 }, z.enum(SWITCHING_EVIDENCE));
 

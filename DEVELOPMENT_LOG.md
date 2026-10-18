@@ -391,11 +391,11 @@ Connect Leystic's public buyer-intent discovery and Learning V1 outcome tracking
   * Commercial reliance on unauthorized Reddit scraping is a critical compliance blocker.
   * Recommended immediate policy: Treat Reddit competitor scanning as an experimental/beta research feature; pause commercial gating of Reddit-derived features until an official Reddit Data API Commercial Agreement or an authorized open syndication source (e.g. Hacker News, GitHub Discussions) is integrated.
 
-### 3. Held-Out Real-World Classification Evaluation
-* Created reproducible evaluation dataset and harness (`scripts/eval-competitor-reasons.ts`, `tests/competitorReasonsEval.test.ts`) across 28 real-world conversations and 6 competitors (Typeform, Jotform, Tally, Fillout, SurveyMonkey, Formstack).
-* Manually labeled independently of model outputs, explicitly including sarcasm, mixed sentiment, resolved complaints, and negative comments from users who explicitly intend to stay.
+### 3. Synthetic Benchmark Dataset & Evaluation Harness
+* Created reproducible evaluation dataset and harness (`scripts/eval-competitor-reasons.ts`, `tests/competitorReasonsEval.test.ts`) across 28 synthetic benchmark conversations and 6 competitors (Typeform, Jotform, Tally, Fillout, SurveyMonkey, Formstack).
+* Explicitly labeled as a synthetic held-out benchmark suite designed to stress-test negation, staying intent, sarcasm, and mixed sentiment without using unauthorized live Reddit data.
 * **Evaluation Results**:
-  * Sample Size: 28 conversations.
+  * Sample Size: 28 synthetic conversations.
   * Explicit Switching Intent: Precision = 100.0%, Recall = 100.0%, Specificity = 100.0%, F1 = 100.0%.
   * Staying Intent False Alarm Rate: 0.0% (0 false positives among locked-in users).
   * Overall Reason Accuracy: 85.7% (24 / 28).
@@ -407,3 +407,64 @@ Connect Leystic's public buyer-intent discovery and Learning V1 outcome tracking
   * Verified that multiple replies in a single thread yield `distinctThreads = 1` and `isRecurring = false`.
   * Verified that independent threads yield `distinctThreads = 2` and `isRecurring = true`.
   * Verified that multiple replies discussing switching within a thread collapse into a single switcher opportunity.
+
+---
+
+## 12. P0: Fix Switching Classification and Genuine Evaluation Harness
+
+**Date**: October 2026
+**Commit Target**: `fix: harden switching classification against negation and make evaluation genuine`
+
+### 1. Objective
+Eliminate negation and staying-intent false positives in competitor switching classification, replace loose substring matching with explicit tested alias mappings and word-boundary regexes, and separate offline benchmark regression verification from live model evaluations.
+
+### 2. Switching Normalization Hardening (`src/lib/competitors/classify.ts`)
+* **Negation Pre-filtering**:
+  * Added `NEGATION_PATTERNS` regex matching to reject phrases such as "not switching", "not leaving", "we cannot switch", "cannot switch", "can't switch", "won't switch", "wont switch", "never switch", "staying despite the issues", "staying", "not actively switching", "will not switch", and "no switch".
+  * Any input matching these negation patterns immediately returns `no_clear_signal`, preventing locked-in or staying users from being falsely flagged as switchers.
+* **Explicit Tested Aliases**:
+  * Replaced broad `.includes("switching")` substring logic with `SWITCHING_ALIAS_MAP`.
+  * Explicitly maps active switching aliases ("actively_switching", "migrating away", "migrating off", "migrated to another tool", "cancelled subscription", "cancelled our subscription", "dumping", "switching away").
+  * Explicitly maps alternative evaluation aliases ("evaluating_alternatives", "looking for alternative", "looking for replacement", "seeking alternatives", "considering alternatives", "considering replacement").
+  * Explicitly maps dissatisfaction aliases without switching ("dissatisfied_no_switch", "frustrated with bug", "frustrated without switching", "complaint").
+  * Preserves valid positive recommendation and neutral/no-signal aliases.
+  * Defaults ambiguous, unsupported, or contradictory text to `no_clear_signal`.
+* **Reason Category Normalization**:
+  * Standardized `REASON_ALIAS_MAP` for explicit categories.
+  * Fallback uses word-boundary regular expressions (`\b...\b`) to eliminate substring collisions (e.g. ensuring "unsupported reason" defaults to `unknown` rather than falsely matching "support").
+
+### 3. Evaluation Harness Realignment (`scripts/eval-competitor-reasons.ts`, `tests/competitorReasonsEval.test.ts`)
+* **Accurate Provenance**:
+  * Explicitly labeled the 28-sample dataset as a synthetic held-out benchmark suite (`DATASET_PROVENANCE`), designed to stress-test negation, staying intent, sarcasm, and mixed sentiment without using unauthorized live Reddit data.
+  * No synthetic example is presented as an unverified "real-world" conversation.
+* **Separation of Concerns**:
+  * Unit tests in `tests/competitorReasonsEval.test.ts` execute deterministically against static benchmark fixtures and verify deduplication and edge-case boundary checks without making paid model or database calls.
+  * Explicit CLI command `npm run eval:competitors` (`scripts/eval-competitor-reasons.ts`) outputs detailed metadata:
+    * Provenance: Synthetic held-out benchmark suite.
+    * Model & Provider: `anthropic/claude-3.5-haiku` via OpenRouter.
+    * Classifier Prompt Version: `v1.1-negation-resistant`.
+    * Classifier Prompt Hash: SHA-256 (`8f8920b4249b2f9f5c4afd0e5c7e8dc878c1cf2e4085dbf0ae709d412a3cc927`).
+    * Evaluation Date: `2026-10-18T13:00:00.000Z`.
+    * Sample Size: 28 synthetic conversations across 6 competitors.
+    * Execution Mode: Offline recorded benchmark outputs (supports `--live` when live credentials and database are available).
+* **Transparent Failure Reporting**:
+  * Documents concrete failure modes:
+    * Sarcasm Error Rate (50.0%): literal interpretation fails on sarcastic price praise.
+    * Mixed Sentiment Error Rate (100.0%): competing praise and complaint clauses cause category or polarity confusion.
+    * Staying Intent False Alarm Rate (0.0%): zero false positives for staying/locked-in users.
+    * Overall Reason Accuracy: 85.7% (24/28).
+    * Abstained / Unknown Count: 3.
+
+### 4. Verification Results
+* `switchingEvidenceSchema.parse("not switching")` returns `no_clear_signal`.
+* `switchingEvidenceSchema.parse("we cannot switch")` returns `no_clear_signal`.
+* `switchingEvidenceSchema.parse("staying despite the issues")` returns `no_clear_signal`.
+* `switchingEvidenceSchema.parse("migrating away")` returns `actively_switching`.
+* `switchingEvidenceSchema.parse("cancelled our subscription")` returns `actively_switching`.
+* `switchingEvidenceSchema.parse("evaluating alternatives")` returns `evaluating_alternatives`.
+* `npm run typecheck`: 0 errors.
+* `npm run lint`: 0 problems (0 errors, 0 warnings).
+* `npm run test`: 82 test files passed, 766 tests passed, 278 skipped (database suites), 0 failures.
+* `npm run build`: Next.js Turbopack build succeeded with 0 errors.
+* `npm run eval:competitors`: Evaluated benchmark with complete provenance, SHA-256 prompt hash, and confusion reporting.
+* `tests/typography.test.ts`: 0 unicode em-dashes or en-dashes across `src/`.

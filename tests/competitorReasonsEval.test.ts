@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { runEvaluation, verifyThreadDeduplication } from "../scripts/eval-competitor-reasons";
 
-describe("competitor reasons held-out real-world evaluation", () => {
+describe("competitor reasons evaluation harness and fixture regression checks", () => {
   const metrics = runEvaluation();
   const dedup = verifyThreadDeduplication();
 
-  it("evaluates a held-out dataset across multiple competitors and edge cases", () => {
+  it("evaluates a synthetic held-out benchmark dataset across multiple competitors and edge cases without live paid calls", () => {
     expect(metrics.sampleSize).toBe(28);
-    // Explicit switching intent should maintain high precision
+    // Explicit switching intent should maintain high precision on benchmark fixtures
     expect(metrics.switching.precision).toBeGreaterThanOrEqual(0.85);
     expect(metrics.switching.recall).toBeGreaterThanOrEqual(0.85);
   });
@@ -17,11 +17,11 @@ describe("competitor reasons held-out real-world evaluation", () => {
     expect(metrics.edgeCaseAnalysis.stayingIntentFalsePositiveRate).toBe(0.0);
   });
 
-  it("accurately records and bounds real-world edge case errors (sarcasm and mixed sentiment)", () => {
+  it("accurately records and bounds edge-case errors on synthetic challenge fixtures (sarcasm and mixed sentiment)", () => {
     // Sarcasm and mixed sentiment are known realistic edge-case challenges in production NLP
     expect(metrics.edgeCaseAnalysis.sarcasmErrorRate).toBeGreaterThan(0.0);
     expect(metrics.edgeCaseAnalysis.mixedSentimentErrorRate).toBeGreaterThan(0.0);
-    // Overall reason accuracy on real-world edge cases remains robust (> 80%)
+    // Overall reason accuracy on benchmark edge cases remains robust (> 80%)
     expect(metrics.reasonCategories.accuracy).toBeGreaterThanOrEqual(0.8);
     expect(metrics.reasonCategories.abstainedUnknownCount).toBe(3);
   });

@@ -15,7 +15,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "anyapi:register": "tsx scripts/register-oauth-client.ts",
-    "scorer:eval": "tsx scripts/scorer-eval.ts"
+    "scorer:eval": "tsx scripts/scorer-eval.ts",
+    "eval:competitors": "tsx scripts/eval-competitor-reasons.ts"
   },
   "dependencies": {
     "@ai-sdk/gateway": "4.0.87",

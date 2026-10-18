@@ -173,6 +173,86 @@ describe("sentiment classification", () => {
   });
 });
 
+describe("switching evidence schema normalization", () => {
+  it("normalizes explicit switching evidence aliases", () => {
+    expect(switchingEvidenceSchema.parse("actively_switching")).toBe("actively_switching");
+    expect(switchingEvidenceSchema.parse("actively switching")).toBe("actively_switching");
+    expect(switchingEvidenceSchema.parse("migrating away")).toBe("actively_switching");
+    expect(switchingEvidenceSchema.parse("migrating off")).toBe("actively_switching");
+    expect(switchingEvidenceSchema.parse("migrated")).toBe("actively_switching");
+    expect(switchingEvidenceSchema.parse("cancelled our subscription")).toBe("actively_switching");
+    expect(switchingEvidenceSchema.parse("canceled subscription")).toBe("actively_switching");
+    expect(switchingEvidenceSchema.parse("switching away")).toBe("actively_switching");
+    expect(switchingEvidenceSchema.parse("evaluating alternatives")).toBe("evaluating_alternatives");
+    expect(switchingEvidenceSchema.parse("evaluating options")).toBe("evaluating_alternatives");
+    expect(switchingEvidenceSchema.parse("looking for replacement")).toBe("evaluating_alternatives");
+    expect(switchingEvidenceSchema.parse("seeking alternatives")).toBe("evaluating_alternatives");
+    expect(switchingEvidenceSchema.parse("considering alternatives")).toBe("evaluating_alternatives");
+    expect(switchingEvidenceSchema.parse("dissatisfied without switching evidence")).toBe("dissatisfied_no_switch");
+    expect(switchingEvidenceSchema.parse("dissatisfied")).toBe("dissatisfied_no_switch");
+    expect(switchingEvidenceSchema.parse("complaint")).toBe("dissatisfied_no_switch");
+    expect(switchingEvidenceSchema.parse("positive recommendation")).toBe("positive_recommendation");
+    expect(switchingEvidenceSchema.parse("recommendation")).toBe("positive_recommendation");
+    expect(switchingEvidenceSchema.parse("satisfied")).toBe("positive_recommendation");
+    expect(switchingEvidenceSchema.parse("no clear signal")).toBe("no_clear_signal");
+  });
+
+  it("safely handles negation and staying wording as no_clear_signal rather than actively_switching", () => {
+    expect(switchingEvidenceSchema.parse("not switching")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("not leaving")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("we cannot switch")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("cannot switch")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("can't switch")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("won't switch")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("wont switch")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("never switch")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("staying despite the issues")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("staying")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("not actively switching")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("will not switch")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("no switch")).toBe("no_clear_signal");
+  });
+
+  it("handles ambiguous, contradictory, or unsupported text by defaulting to no_clear_signal", () => {
+    expect(switchingEvidenceSchema.parse("not sure if we will leave")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("random string that mentions nothing")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse("")).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse(null)).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse(undefined)).toBe("no_clear_signal");
+    expect(switchingEvidenceSchema.parse(123)).toBe("no_clear_signal");
+  });
+});
+
+describe("reason category schema normalization", () => {
+  it("normalizes explicit reason category aliases", () => {
+    expect(reasonCategorySchema.parse("pricing_value")).toBe("pricing_value");
+    expect(reasonCategorySchema.parse("pricing / value")).toBe("pricing_value");
+    expect(reasonCategorySchema.parse("expensive")).toBe("pricing_value");
+    expect(reasonCategorySchema.parse("missing feature")).toBe("missing_capability");
+    expect(reasonCategorySchema.parse("capability limitation")).toBe("missing_capability");
+    expect(reasonCategorySchema.parse("clunky ui")).toBe("usability");
+    expect(reasonCategorySchema.parse("confusing workflow")).toBe("usability");
+    expect(reasonCategorySchema.parse("uptime")).toBe("reliability");
+    expect(reasonCategorySchema.parse("bugs")).toBe("reliability");
+    expect(reasonCategorySchema.parse("slow")).toBe("performance");
+    expect(reasonCategorySchema.parse("latency")).toBe("performance");
+    expect(reasonCategorySchema.parse("zapier")).toBe("integrations");
+    expect(reasonCategorySchema.parse("webhook")).toBe("integrations");
+    expect(reasonCategorySchema.parse("customer support")).toBe("support");
+    expect(reasonCategorySchema.parse("documentation")).toBe("support");
+    expect(reasonCategorySchema.parse("value delivered")).toBe("recommendation_value_delivered");
+    expect(reasonCategorySchema.parse("endorsement")).toBe("recommendation_value_delivered");
+  });
+
+  it("defaults unsupported reason categories to unknown", () => {
+    expect(reasonCategorySchema.parse("unsupported reason")).toBe("unknown");
+    expect(reasonCategorySchema.parse("")).toBe("unknown");
+    expect(reasonCategorySchema.parse(null)).toBe("unknown");
+    expect(reasonCategorySchema.parse(undefined)).toBe("unknown");
+    expect(reasonCategorySchema.parse(42)).toBe("unknown");
+  });
+});
+
 describe("only posts about the competitor are stored", () => {
   it("keeps a post the writer is using or leaving, and drops a passing link", () => {
     const kept = keepMentions(
@@ -727,7 +807,7 @@ describe("curated benchmark fixture: switching evidence vs general dissatisfacti
     },
   ];
 
-  it("achieves 100% precision by ensuring general negative complaints never falsely trigger switching signals", () => {
+  it("verifies fixture definitions ensure negative complaints without switching signals parse as dissatisfied_no_switch", () => {
     const negativeComplaints = benchmarkSet.filter(
       (item) => item.groundTruth.sentiment === "negative" && !item.groundTruth.isExplicitSwitching,
     );
