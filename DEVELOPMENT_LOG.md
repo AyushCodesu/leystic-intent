@@ -510,3 +510,47 @@ Separate string token normalization from post evidence verification so that mode
 * `npm run build`: Production build succeeded with Next.js Turbopack.
 * Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all modified files.
 
+---
+
+## 14. P0: Bidirectional Competitor Switching Classification
+
+**Date**: October 2026<br/>
+**Commit Target**: `fix: make competitor switching classification bidirectional`
+
+### 1. Objective
+Eliminate false-negative switching gaps in `guardSwitchingEvidence`. The previous guard returned early unless the model proposed `actively_switching` or `evaluating_alternatives`, allowing model false negatives (e.g. predicting `dissatisfied_no_switch` or `no_clear_signal` on posts with explicit current transitions or alternative queries) to bypass candidate evidence checks. The guard now inspects post title and body bidirectionally to override both incorrect switching and incorrect non-switching labels.
+
+### 2. Bidirectional Evidence Architecture (`src/lib/competitors/classify.ts`)
+* **Modular Evidence Helpers**:
+  * `isCompletedHistoricalMigration(text)`: Identifies completed past migrations without a current transition (e.g. "migrated away two years ago", "switched last year") and prevents them from triggering active switching.
+  * `hasCurrentSwitchEvidence(text)`: Detects explicit active migrations, cancellations, or transitions in progress ("we are migrating away now", "cancelled our SurveyMonkey subscription yesterday", "dumping Formstack").
+  * `hasAlternativeSearchEvidence(text)`: Detects explicit searches for replacements or alternatives ("Is there any good alternative to Jotform?").
+  * `hasStayingOrLockInEvidence(text, competitor)`: Detects staying statements, inability to leave, compliance approval locks, or vendor lock-in.
+  * `hasEffectiveStaying(text, competitor)`: Resolves staying signals by verifying that current active switching is not suppressed by historical inability ("could not switch last year") or unrelated context ("staying up late", "sister company is staying").
+  * `isDissatisfiedContent(text, sentiment)`: Distinguishes genuine complaints and dissatisfaction from neutral informational inquiries.
+* **Bidirectional Resolution Precedence**:
+  1. *Effective staying / inability / lock-in*: Preempts switching signals, mapping to `dissatisfied_no_switch` if dissatisfaction is present, or `no_clear_signal` if absent.
+  2. *Explicit current switching*: Overrides model false negatives (`dissatisfied_no_switch`, `no_clear_signal`) to `actively_switching`.
+  3. *Genuine alternative search*: Overrides model false negatives (`no_clear_signal`) to `evaluating_alternatives`.
+  4. *False-positive switching labels*: When text contains neither current switching nor alternative evaluation, model predictions of `actively_switching` or `evaluating_alternatives` are corrected to `dissatisfied_no_switch` (if dissatisfied) or `no_clear_signal`.
+  5. *Non-switching labels*: Preserves valid `dissatisfied_no_switch`, `positive_recommendation`, or `no_clear_signal`.
+
+### 3. Production Pipeline Regression Testing (`tests/competitors.test.ts`)
+* **Mock Pipeline Verification (`classifyMentions`)**:
+  * **Case A (Current switch overrides historical inability)**: Model predicts `dissatisfied_no_switch` on "could not switch last year, but we are migrating away now"; corrected to `actively_switching`.
+  * **Case B (Alternative query overrides neutral label)**: Model predicts `no_clear_signal` on "Is there any good alternative to Jotform? The builder is too slow"; corrected to `evaluating_alternatives`.
+  * **Case C (Compliance lock-in blocks false switching)**: Model predicts `actively_switching` on "Typeform is frustrating, but we cannot switch because our compliance team approved it"; corrected to `dissatisfied_no_switch`.
+  * **Case D (Informational question blocks false switching)**: Model predicts `actively_switching` on "Does Typeform support webhooks? Not switching, just asking"; corrected to `no_clear_signal`.
+  * **Historical Migrations**: "switched to Tally last year" with model prediction `actively_switching` is corrected to `no_clear_signal`.
+  * **Third-party / Unrelated Context**: Current active switches are preserved when staying mentions refer to another entity ("sister company is staying") or idioms ("staying up late").
+
+### 4. Verification Results
+* `tests/competitors.test.ts`: 61 tests passed (100%), including unit tests for all 6 evidence helpers and end-to-end `classifyMentions` mock production runs.
+* `tests/competitorReasonsEval.test.ts`: 6 tests passed (100%).
+* `npm run eval:competitors`: Evaluates 28-sample offline benchmark dataset cleanly.
+* `npm run eval:competitors -- --live`: Aborts cleanly with error banner and exit code 1 when live prerequisites are absent.
+* `npm run typecheck`: 0 errors.
+* `npm run lint`: 0 problems (0 errors, 0 warnings).
+* `npm run test`: 82 test files passed (791 tests passed, 278 skipped database tests), 0 failures.
+* `npm run build`: Production build succeeded with Next.js Turbopack in 2.8s.
+* Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all files.

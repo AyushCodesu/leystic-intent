@@ -339,6 +339,156 @@ export type Verdict = {
  * 3. Dissatisfied posts with explicit staying intent become `dissatisfied_no_switch`, while posts without dissatisfaction
  *    become `no_clear_signal`.
  */
+/**
+ * Detects completed historical migration statements that describe past transitions
+ * without any evidence of current switching or migration away from the competitor.
+ */
+export function isCompletedHistoricalMigration(text: string): boolean {
+  // If the text contains current transition markers ("now", "today", "currently", "this month/week"),
+  // or a contrastive clause ("but now we are migrating"), it is not a completed historical event only.
+  const hasCurrentTransition =
+    /\b(?:currently|now|today|this\s+(?:week|month|afternoon)|finally|already\s+signed\s+up|in\s+the\s+process\s+of)\b/i.test(text) ||
+    /\bbut\s+(?:now|today|currently|finally|we\s+are|we're)\s+(?:migrating|switching|moving|leaving|cancelling|canceling|dumping)\b/i.test(text);
+
+  if (hasCurrentTransition) {
+    return false;
+  }
+
+  const hasPastMigrationVerb =
+    /\b(?:migrated|switched|moved|dumped|cancelled|canceled|left)\b/i.test(text) ||
+    /\bused\s+to\s+(?:use|have)\b/i.test(text);
+
+  const hasHistoricalTimeframe =
+    /\b(?:\d+|two|three|four|five|several|many|a\s+couple\s+of)?\s*(?:years?|months?)\s+ago\b/i.test(text) ||
+    /\blast\s+year\b/i.test(text) ||
+    /\bback\s+in\s+(?:201\d|202[0-5])\b/i.test(text) ||
+    /\bin\s+(?:201\d|202[0-5])\b/i.test(text) ||
+    /\bpreviously\s+(?:used|had|switched|migrated)\b/i.test(text);
+
+  return hasPastMigrationVerb && hasHistoricalTimeframe;
+}
+
+/**
+ * Detects explicit current migration, cancellation, or transition to another tool.
+ */
+export function hasCurrentSwitchEvidence(text: string): boolean {
+  if (isCompletedHistoricalMigration(text)) {
+    return false;
+  }
+
+  return (
+    /\b(?:we\s+are|we're|i\s+am|i'm|currently|now|already|finally|just|this\s+(?:week|month|afternoon))\s+(?:actively\s+)?(?:migrating|migrated|cancelling|canceled|cancelled|dumping|switching|moving)\b/i.test(text) ||
+    /\b(?:migrating|migrated)\s+(?:away|off|over|to)\b/i.test(text) ||
+    /\b(?:cancelled|canceled|cancelling|canceling)\s+(?:our|my|the)?\s*(?:[a-z0-9_-]+\s+)?(?:subscription|account|plan)\b/i.test(text) ||
+    /\b(?:switching|switched)\s+(?:away|off|over|to)\s+[a-z0-9_-]+/i.test(text) ||
+    /\bdumping\s+[a-z0-9_-]+/i.test(text) ||
+    /\bmoved\s+(?:our|my|all|the)?\s*(?:whole\s+)?(?:workflow|team|forms?|stack|data)?\s*(?:away|over|off|to)\b/i.test(text)
+  );
+}
+
+/**
+ * Detects genuine queries or requests looking for or evaluating alternatives.
+ */
+export function hasAlternativeSearchEvidence(text: string): boolean {
+  return (
+    /\b(?:alternative|alternatives|replacement|replacements)\s+(?:to|for)\b/i.test(text) ||
+    /\b(?:looking|searching|seeking|evaluating|considering|exploring)\s+(?:for\s+)?(?:an?\s+)?(?:alternative|alternatives|replacement|replacements|options?)\b/i.test(text) ||
+    /\bany(?:one)?\s+know\s+(?:an?|any)?\s*(?:good\s+)?(?:alternative|tool\s+like|competitor)\b/i.test(text) ||
+    /\brecommend(?:ations?)?\s+(?:for\s+)?(?:an?\s+)?(?:alternative|replacement)\b/i.test(text) ||
+    /\b(?:are\s+there|is\s+there)\s+any\s+(?:good\s+)?(?:form\s+tools?|tools?|apps?|competitors?)\s+like\b/i.test(text) ||
+    /\bneed\s+(?:an?\s+)?alternative\s+to\b/i.test(text)
+  );
+}
+
+/**
+ * Detects statements indicating staying intent, inability to switch, or vendor/compliance lock-in.
+ */
+export function hasStayingOrLockInEvidence(text: string, competitor?: string): boolean {
+  const escapedCompetitor = competitor ? competitor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "";
+  const competitorStaying = escapedCompetitor
+    ? new RegExp(`\\b(?:staying\\s+(?:with|on)|not\\s+leaving)\\s+${escapedCompetitor}\\b`, "i").test(text)
+    : false;
+
+  return (
+    competitorStaying ||
+    /\b(?:cannot|can't|cant|won't|wont|will\s+not|never|could\s+not|couldn't)\s+(?:switch|leave|migrate|move)\b/i.test(text) ||
+    /\bnot\s+(?:actively\s+)?(?:switching|leaving|migrating|moving)\b/i.test(text) ||
+    /\bno\s+(?:switch|plans?\s+to\s+switch|intention\s+to\s+switch|way\s+to\s+switch)\b/i.test(text) ||
+    /\bnot\s+(?:looking\s+for|seeking|evaluating|considering)\s+(?:alternatives?|replacements?)\b/i.test(text) ||
+    /\btoo\s+(?:many|much)\s+(?:integrations?|dependencies|complexity)\s+to\s+(?:ever\s+)?(?:leave|switch)\b/i.test(text) ||
+    /\b(?:compliance|legal|security|enterprise)\s+(?:team\s+)?approved\s+.*?\b(?:cannot|can't|unable\s+to)\s+switch\b/i.test(text) ||
+    /\b(?:vendor|api|data|platform|integration)\s+lock-?in\b/i.test(text) ||
+    /\b(?:cannot|can't|unable\s+to)\s+(?:leave|switch)\s+because\b/i.test(text) ||
+    /\bstaying\s+despite\b/i.test(text) ||
+    /\b(?:decided|chosen|plan|planning|going)\s+to\s+stay\b/i.test(text) ||
+    /\bstaying\s+(?:with|on)\s+[a-z0-9_-]+/i.test(text) ||
+    /\b(?:we're|we\s+are|i'm|i\s+am)\s+staying\b(?!\s+(?:at\b|up\b|in\s+touch\b|tuned\b))/i.test(text)
+  );
+}
+
+/**
+ * Evaluates whether staying or lock-in applies to the author currently,
+ * excluding historical inabilities, statements about other entities, or unrelated uses of "staying".
+ */
+export function hasEffectiveStaying(text: string, competitor?: string): boolean {
+  if (!hasStayingOrLockInEvidence(text, competitor)) {
+    return false;
+  }
+
+  // 1. Is inability historical and contrasted with a current transition?
+  const isHistoricalInabilityOnly =
+    (/\b(?:could\s+not|couldn't|was\s+not\s+able\s+to|were\s+not\s+able\s+to|used\s+to\s+not)\s+switch\b/i.test(text) ||
+     /\b(?:last\s+year|previously|in\s+the\s+past|before|initially)\b.*?\b(?:cannot|can't|could\s+not|couldn't|didn't)\s+switch\b/i.test(text)) &&
+    /\bbut\s+(?:now|currently|today|finally|we\s+are|we're)\b.*?\b(?:migrat|switch|leav|cancel|dump)/i.test(text);
+
+  if (isHistoricalInabilityOnly) {
+    return false;
+  }
+
+  // 2. Is the staying statement about another team or company while the author migrates?
+  const isOtherTeamStaying =
+    /\b(?:partner|client|sister\s+company|other\s+team|parent\s+company)\s+(?:is\s+)?staying\b/i.test(text) &&
+    /\b(?:we|our\s+team|i)\s+(?:are|am|'re|'m)?\s*(?:migrating|switching|dumping|moving|leaving|cancelling|canceling)\b/i.test(text);
+
+  if (isOtherTeamStaying) {
+    return false;
+  }
+
+  // 3. Is the word "staying" used in an unrelated colloquial sense?
+  const isUnrelatedStaying =
+    /\bstaying\s+(?:up\s+late|up|at\s+a\s+hotel|at\b|in\s+touch\b|tuned\b)/i.test(text) &&
+    !/\bstaying\s+(?:with|on)\s+[a-z0-9_-]+/i.test(text);
+
+  if (isUnrelatedStaying) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Detects whether the candidate text or proposed sentiment indicates dissatisfaction/complaint.
+ */
+export function isDissatisfiedContent(text: string, sentiment?: Sentiment): boolean {
+  if (sentiment === "negative") {
+    return true;
+  }
+
+  return /\b(?:frustrat|hate|terrible|awful|horrible|broken|outage|downtime|bug|bugs|issue|issues|annoy|expensive|extortion|ridiculous|fail|fails|failed|failing|slow|bloated|delay|unhappy|disappointed|angry|mad|sucks|worst)\b/i.test(text);
+}
+
+/**
+ * Evaluates a model's proposed switching label against the candidate post's actual title and body.
+ *
+ * Bidirectional guard:
+ * 1. Explicit current migration, cancellation, or transition overrides incorrect non-switching
+ *    labels (dissatisfied_no_switch, no_clear_signal) to actively_switching.
+ * 2. Genuine alternative searches override incorrect neutral labels to evaluating_alternatives.
+ * 3. Statements indicating staying intent, inability to switch, or lock-in block switching labels
+ *    and map to dissatisfied_no_switch (if dissatisfaction is present) or no_clear_signal.
+ * 4. Completed historical migrations without a current transition do not become actively_switching.
+ * 5. Negative sentiment alone does not imply switching intent.
+ */
 export function guardSwitchingEvidence(
   candidate: { title: string; body: string },
   proposed: {
@@ -348,92 +498,42 @@ export function guardSwitchingEvidence(
   },
   competitor?: string,
 ): SwitchingEvidence {
-  const label = proposed.switchingEvidence;
+  const fullText = `${candidate.title} ${candidate.body}`;
+  const proposedLabel = proposed.switchingEvidence;
 
-  // Only switching signals (actively_switching or evaluating_alternatives) need evidence guarding
-  if (label !== "actively_switching" && label !== "evaluating_alternatives") {
-    return label;
+  const effectiveStaying = hasEffectiveStaying(fullText, competitor);
+  const currentSwitch = hasCurrentSwitchEvidence(fullText);
+  const altSearch = hasAlternativeSearchEvidence(fullText);
+  const dissatisfied = isDissatisfiedContent(fullText, proposed.sentiment);
+
+  // 1. Explicit staying / inability / lock-in takes precedence over switching
+  if (effectiveStaying) {
+    return dissatisfied ? "dissatisfied_no_switch" : "no_clear_signal";
   }
 
-  const fullText = `${candidate.title} ${candidate.body}`;
-  const escapedCompetitor = competitor ? competitor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "";
-  const competitorStaying = escapedCompetitor
-    ? new RegExp(`\\b(?:staying\\s+(?:with|on)|not\\s+leaving)\\s+${escapedCompetitor}\\b`, "i").test(fullText)
-    : false;
-
-  // 1. Check for explicit current switching actions (strong positive evidence)
-  const hasCurrentActiveSwitch =
-    /\b(?:we\s+are|we're|i\s+am|i'm|currently|now|already|finally|just)\s+(?:actively\s+)?(?:migrating|migrated|cancelling|canceled|cancelled|dumping|switching)\b/i.test(fullText) ||
-    /\b(?:migrating|migrated)\s+(?:away|off|over|to)\b/i.test(fullText) ||
-    /\b(?:cancelled|canceled|cancelling|canceling)\s+(?:our|my|the)?\s*subscription\b/i.test(fullText) ||
-    /\b(?:switching|switched)\s+(?:away|off|over|to)\s+[a-z0-9_-]+/i.test(fullText) ||
-    /\bdumping\s+[a-z0-9_-]+/i.test(fullText) ||
-    /\bmoved\s+(?:our|my|all|the)?\s*(?:whole\s+)?(?:workflow|team|forms?|stack|data)?\s*(?:away|over|off|to)\b/i.test(fullText);
-
-  // 2. Check for explicit alternative evaluation queries
-  const hasEvaluatingAlternatives =
-    /\b(?:alternative|alternatives|replacement|replacements)\s+(?:to|for)\b/i.test(fullText) ||
-    /\b(?:looking|searching|seeking|evaluating|considering|exploring)\s+(?:for\s+)?(?:an?\s+)?(?:alternative|alternatives|replacement|replacements|options?)\b/i.test(fullText) ||
-    /\bany(?:one)?\s+know\s+(?:an?|any)?\s*(?:good\s+)?(?:alternative|tool\s+like|competitor)\b/i.test(fullText) ||
-    /\brecommend(?:ations?)?\s+(?:for\s+)?(?:an?\s+)?(?:alternative|replacement)\b/i.test(fullText);
-
-  // 3. Check for explicit staying / inability to switch / lock-in
-  const hasStayingOrNegation =
-    competitorStaying ||
-    /\b(?:cannot|can't|cant|won't|wont|will\s+not|never|could\s+not|couldn't)\s+(?:switch|leave|migrate|move)\b/i.test(fullText) ||
-    /\bnot\s+(?:actively\s+)?(?:switching|leaving|migrating|moving)\b/i.test(fullText) ||
-    /\bno\s+(?:switch|plans?\s+to\s+switch|intention\s+to\s+switch|way\s+to\s+switch)\b/i.test(fullText) ||
-    /\bnot\s+(?:looking\s+for|seeking|evaluating|considering)\s+(?:alternatives?|replacements?)\b/i.test(fullText) ||
-    /\btoo\s+(?:many|much)\s+(?:integrations?|dependencies|complexity)\s+to\s+(?:ever\s+)?(?:leave|switch)\b/i.test(fullText) ||
-    /\b(?:compliance|legal|security|enterprise)\s+(?:team\s+)?approved\s+.*?\b(?:cannot|can't|unable\s+to)\s+switch\b/i.test(fullText) ||
-    /\b(?:vendor|api|data|platform|integration)\s+lock-?in\b/i.test(fullText) ||
-    /\b(?:cannot|can't|unable\s+to)\s+(?:leave|switch)\s+because\b/i.test(fullText) ||
-    /\bstaying\s+despite\b/i.test(fullText) ||
-    /\b(?:decided|chosen|plan|planning|going)\s+to\s+stay\b/i.test(fullText) ||
-    /\bstaying\s+(?:with|on)\s+[a-z0-9_-]+/i.test(fullText) ||
-    /\b(?:we're|we\s+are|i'm|i\s+am)\s+staying\b(?!\s+(?:at\b|up\b|in\s+touch\b|tuned\b))/i.test(fullText);
-
-  // Check if negation is merely historical (e.g. "We could not switch last year, but we are migrating away now")
-  const isHistoricalNegationOnly =
-    hasStayingOrNegation &&
-    hasCurrentActiveSwitch &&
-    (/\b(?:could\s+not|couldn't|was\s+not\s+able\s+to|were\s+not\s+able\s+to|used\s+to\s+not)\s+switch\b/i.test(fullText) ||
-     /\b(?:last\s+year|previously|in\s+the\s+past|before|initially)\b.*?\b(?:cannot|can't|could\s+not|couldn't|didn't)\s+switch\b/i.test(fullText) ||
-     /\bbut\s+(?:now|currently|today|finally|we\s+are|we're)\b.*?\b(?:migrat|switch|leav|cancel)/i.test(fullText));
-
-  // Check if staying mention is unrelated (e.g. "staying up late", "staying at a hotel", "partner is staying")
-  const isUnrelatedStaying =
-    hasStayingOrNegation &&
-    hasCurrentActiveSwitch &&
-    (/\bstaying\s+(?:up\s+late|up|at\s+a\s+hotel|at\b|in\s+touch\b|tuned\b)/i.test(fullText) ||
-     /\b(?:partner|client|sister\s+company|other\s+team)\s+(?:is\s+)?staying\b/i.test(fullText));
-
-  // If there is an active current switch and the negation is historical or unrelated, preserve actively_switching
-  if (label === "actively_switching" && hasCurrentActiveSwitch && (isHistoricalNegationOnly || isUnrelatedStaying || !hasStayingOrNegation)) {
+  // 2. Explicit current switching evidence overrides model false negatives
+  if (currentSwitch) {
     return "actively_switching";
   }
 
-  // If label is evaluating_alternatives and author is explicitly looking for alternatives without staying/negation
-  if (label === "evaluating_alternatives" && hasEvaluatingAlternatives && !hasStayingOrNegation) {
+  // 3. Genuine alternative search queries override model false negatives
+  if (altSearch) {
     return "evaluating_alternatives";
   }
 
-  // If staying/inability/negation is active, or if there is no switching evidence in the text
-  const isDissatisfied =
-    proposed.sentiment === "negative" ||
-    /\b(?:frustrat|hate|terrible|awful|horrible|broken|outage|downtime|bug|bugs|issue|issues|annoy|expensive|extortion|ridiculous|fail|fails|failed|failing|slow|bloated|delay|unhappy|disappointed|angry|mad|sucks|worst)\b/i.test(fullText);
-
-  if (hasStayingOrNegation) {
-    // Explicit inability, lock-in or decision to stay
-    return isDissatisfied ? "dissatisfied_no_switch" : "no_clear_signal";
+  // 4. When text contains NO current switching or alternative evaluation:
+  // If the model proposed actively_switching or evaluating_alternatives, that was a false positive.
+  if (proposedLabel === "actively_switching" || proposedLabel === "evaluating_alternatives") {
+    return dissatisfied ? "dissatisfied_no_switch" : "no_clear_signal";
   }
 
-  // If proposed was actively_switching or evaluating_alternatives, but text contains NO evidence of either:
-  if (!hasCurrentActiveSwitch && !hasEvaluatingAlternatives) {
-    return isDissatisfied ? "dissatisfied_no_switch" : "no_clear_signal";
+  // 5. For non-switching labels (dissatisfied_no_switch, positive_recommendation, no_clear_signal):
+  if (proposedLabel === "dissatisfied_no_switch") {
+    // Preserve dissatisfied_no_switch only if there is genuine dissatisfaction
+    return dissatisfied ? "dissatisfied_no_switch" : "no_clear_signal";
   }
 
-  return label;
+  return proposedLabel;
 }
 
 function describe(item: MentionCandidate): string {

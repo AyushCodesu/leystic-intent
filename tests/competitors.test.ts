@@ -19,6 +19,12 @@ const {
 const {
   classifyMentions,
   guardSwitchingEvidence,
+  hasAlternativeSearchEvidence,
+  hasCurrentSwitchEvidence,
+  hasEffectiveStaying,
+  hasStayingOrLockInEvidence,
+  isCompletedHistoricalMigration,
+  isDissatisfiedContent,
   reasonCategorySchema,
   switchingEvidenceSchema,
 } = await import("@/lib/competitors/classify");
@@ -420,6 +426,149 @@ describe("evidence-aware guard against candidate post text (guardSwitchingEviden
       ),
     ).toBe("dissatisfied_no_switch");
   });
+
+  it("identifies completed historical migrations without current transitions", () => {
+    expect(
+      isCompletedHistoricalMigration(
+        "We migrated away from Typeform two years ago, just sharing our experience.",
+      ),
+    ).toBe(true);
+    expect(
+      isCompletedHistoricalMigration(
+        "We switched to Jotform 3 years ago and it's been great.",
+      ),
+    ).toBe(true);
+    expect(
+      isCompletedHistoricalMigration(
+        "We switched from Typeform to Tally last year because Typeform was too expensive.",
+      ),
+    ).toBe(true);
+
+    // Current transition contrastive clauses are NOT completed historical migrations only
+    expect(
+      isCompletedHistoricalMigration(
+        "We could not switch last year, but we are migrating away now.",
+      ),
+    ).toBe(false);
+    expect(
+      isCompletedHistoricalMigration(
+        "Cancelled our SurveyMonkey subscription yesterday and moved our whole workflow over to an open-source tool.",
+      ),
+    ).toBe(false);
+  });
+
+  it("verifies individual evidence detection helpers directly", () => {
+    expect(
+      hasCurrentSwitchEvidence(
+        "We could not switch last year, but we are migrating away now.",
+      ),
+    ).toBe(true);
+    expect(
+      hasCurrentSwitchEvidence(
+        "Cancelled our SurveyMonkey subscription yesterday.",
+      ),
+    ).toBe(true);
+    expect(
+      hasCurrentSwitchEvidence(
+        "We migrated away from Typeform two years ago, just sharing our experience.",
+      ),
+    ).toBe(false);
+
+    expect(
+      hasAlternativeSearchEvidence(
+        "Is there any good alternative to Jotform? The builder is too slow.",
+      ),
+    ).toBe(true);
+    expect(
+      hasAlternativeSearchEvidence(
+        "Does Typeform support webhooks? Not switching, just asking.",
+      ),
+    ).toBe(false);
+
+    expect(
+      hasStayingOrLockInEvidence(
+        "Typeform is frustrating, but we cannot switch because our compliance team approved it.",
+        "Typeform",
+      ),
+    ).toBe(true);
+    expect(
+      hasStayingOrLockInEvidence(
+        "We are actively migrating off Typeform this month.",
+        "Typeform",
+      ),
+    ).toBe(false);
+
+    expect(
+      hasEffectiveStaying(
+        "Typeform is frustrating, but we cannot switch because our compliance team approved it.",
+        "Typeform",
+      ),
+    ).toBe(true);
+    expect(
+      hasEffectiveStaying(
+        "We could not switch last year, but we are migrating away now.",
+        "Typeform",
+      ),
+    ).toBe(false);
+
+    expect(isDissatisfiedContent("Typeform is frustrating and slow", "neutral")).toBe(true);
+    expect(isDissatisfiedContent("Does Typeform support webhooks?", "neutral")).toBe(false);
+    expect(isDissatisfiedContent("Everything is great", "negative")).toBe(true);
+  });
+
+  it("overrides false negative model predictions when candidate evidence is explicit (Case A and Case B)", () => {
+    // Case A: Model predicted dissatisfied_no_switch, but text has explicit current migration
+    const candidateA = {
+      title: "Finally moving",
+      body: "We could not switch last year, but we are migrating away now.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidateA,
+        { sentiment: "negative", reasonCategory: "pricing_value", switchingEvidence: "dissatisfied_no_switch" },
+        "Typeform",
+      ),
+    ).toBe("actively_switching");
+
+    // Case B: Model predicted no_clear_signal, but text has genuine alternative search
+    const candidateB = {
+      title: "Need recommendations",
+      body: "Is there any good alternative to Jotform? The builder is too slow.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        candidateB,
+        { sentiment: "neutral", reasonCategory: "usability", switchingEvidence: "no_clear_signal" },
+        "Jotform",
+      ),
+    ).toBe("evaluating_alternatives");
+  });
+
+  it("blocks false positive actively_switching on completed historical migrations", () => {
+    const historicalNeutral = {
+      title: "Our history",
+      body: "We migrated away from Typeform two years ago, just sharing our experience.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        historicalNeutral,
+        { sentiment: "neutral", reasonCategory: "unknown", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("no_clear_signal");
+
+    const historicalComplaint = {
+      title: "Past experience",
+      body: "We switched from Typeform to Tally last year because Typeform was too expensive.",
+    };
+    expect(
+      guardSwitchingEvidence(
+        historicalComplaint,
+        { sentiment: "negative", reasonCategory: "pricing_value", switchingEvidence: "actively_switching" },
+        "Typeform",
+      ),
+    ).toBe("dissatisfied_no_switch");
+  });
 });
 
 describe("production classifyMentions evidence-aware switching guard", () => {
@@ -551,17 +700,17 @@ describe("production classifyMentions evidence-aware switching guard", () => {
     expect(verdicts.get("m-integrations")?.switchingEvidence).toBe("dissatisfied_no_switch");
   });
 
-  it("preserves actively_switching on explicit current switch with historical inability", async () => {
+  it("Case A: overrides model-proposed dissatisfied_no_switch to actively_switching for explicit current switch with historical inability", async () => {
     generateStructured.mockResolvedValue({
       mentions: [
         {
           id: "m-historical",
           about: "the_product",
           sentiment: "negative",
-          summary: "Migrating away now",
+          summary: "Frustrated with past lock-in but migrating now",
           reasonCategory: "pricing_value",
-          switchingEvidence: "actively_switching",
-          explanation: "Migrating away after past inability",
+          switchingEvidence: "dissatisfied_no_switch", // Deliberately incorrect non-switching model prediction
+          explanation: "Author could not switch last year but migrating away now",
         },
       ],
     });
@@ -571,14 +720,95 @@ describe("production classifyMentions evidence-aware switching guard", () => {
         id: "m-historical",
         title: "Finally migrating",
         subreddit: "SaaS",
-        body: "We could not switch last year due to vendor lock-in, but we are migrating away now.",
+        body: "We could not switch last year, but we are migrating away now.",
       },
     ]);
 
     expect(verdicts.get("m-historical")?.switchingEvidence).toBe("actively_switching");
   });
 
-  it("preserves actively_switching on unrelated staying mentions", async () => {
+  it("Case B: overrides model-proposed no_clear_signal to evaluating_alternatives for genuine alternative searches", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-eval-alt",
+          about: "the_product",
+          sentiment: "neutral",
+          summary: "Asking about Jotform alternatives",
+          reasonCategory: "usability",
+          switchingEvidence: "no_clear_signal", // Deliberately incorrect neutral model prediction
+          explanation: "Author asks for good alternatives",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Jotform", [
+      {
+        id: "m-eval-alt",
+        title: "Need recommendations",
+        subreddit: "SaaS",
+        body: "Is there any good alternative to Jotform? The builder is too slow.",
+      },
+    ]);
+
+    expect(verdicts.get("m-eval-alt")?.switchingEvidence).toBe("evaluating_alternatives");
+  });
+
+  it("Case C: blocks false positive actively_switching when compliance lock-in prevents switching", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-compliance-c",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Frustrated with Typeform but locked in by compliance",
+          reasonCategory: "usability",
+          switchingEvidence: "actively_switching", // Deliberately incorrect switching model prediction
+          explanation: "Compliance approved it so cannot switch",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Typeform", [
+      {
+        id: "m-compliance-c",
+        title: "Compliance approval",
+        subreddit: "SaaS",
+        body: "Typeform is frustrating, but we cannot switch because our compliance team approved it.",
+      },
+    ]);
+
+    expect(verdicts.get("m-compliance-c")?.switchingEvidence).toBe("dissatisfied_no_switch");
+  });
+
+  it("Case D: blocks false positive actively_switching on informational questions lacking switching intent", async () => {
+    generateStructured.mockResolvedValue({
+      mentions: [
+        {
+          id: "m-webhook-d",
+          about: "the_product",
+          sentiment: "neutral",
+          summary: "Inquiring about webhook capability",
+          reasonCategory: "unknown",
+          switchingEvidence: "actively_switching", // Deliberately incorrect switching model prediction
+          explanation: "Asking about webhooks",
+        },
+      ],
+    });
+
+    const verdicts = await classifyMentions("project-1", "Typeform", [
+      {
+        id: "m-webhook-d",
+        title: "Webhook support query",
+        subreddit: "SaaS",
+        body: "Does Typeform support webhooks? Not switching, just asking.",
+      },
+    ]);
+
+    expect(verdicts.get("m-webhook-d")?.switchingEvidence).toBe("no_clear_signal");
+  });
+
+  it("overrides model-proposed dissatisfied_no_switch to actively_switching on unrelated staying mentions", async () => {
     generateStructured.mockResolvedValue({
       mentions: [
         {
@@ -587,7 +817,7 @@ describe("production classifyMentions evidence-aware switching guard", () => {
           sentiment: "negative",
           summary: "Cancelled subscription after late night debugging",
           reasonCategory: "reliability",
-          switchingEvidence: "actively_switching",
+          switchingEvidence: "dissatisfied_no_switch", // Deliberately incorrect model prediction
           explanation: "Cancelled subscription",
         },
         {
@@ -596,7 +826,7 @@ describe("production classifyMentions evidence-aware switching guard", () => {
           sentiment: "negative",
           summary: "Migrating away while sister company stays",
           reasonCategory: "pricing_value",
-          switchingEvidence: "actively_switching",
+          switchingEvidence: "dissatisfied_no_switch", // Deliberately incorrect model prediction
           explanation: "Migrating to Jotform",
         },
       ],
@@ -621,58 +851,47 @@ describe("production classifyMentions evidence-aware switching guard", () => {
     expect(verdicts.get("m-sister-company")?.switchingEvidence).toBe("actively_switching");
   });
 
-  it("preserves evaluating_alternatives for genuine alternative searches", async () => {
+  it("blocks false positive actively_switching on completed historical migrations with no current transition", async () => {
     generateStructured.mockResolvedValue({
       mentions: [
         {
-          id: "m-eval-alt",
-          about: "the_product",
-          sentiment: "negative",
-          summary: "Looking for Jotform alternative",
-          reasonCategory: "usability",
-          switchingEvidence: "evaluating_alternatives",
-          explanation: "Seeking alternative because builder is slow",
-        },
-      ],
-    });
-
-    const verdicts = await classifyMentions("project-1", "Jotform", [
-      {
-        id: "m-eval-alt",
-        title: "Need recommendations",
-        subreddit: "SaaS",
-        body: "Is there any good alternative to Jotform? Their form builder is way too slow and clunky.",
-      },
-    ]);
-
-    expect(verdicts.get("m-eval-alt")?.switchingEvidence).toBe("evaluating_alternatives");
-  });
-
-  it("overrides model-proposed actively_switching to no_clear_signal on neutral query lacking dissatisfaction", async () => {
-    generateStructured.mockResolvedValue({
-      mentions: [
-        {
-          id: "m-neutral-query",
+          id: "m-past-neutral",
           about: "the_product",
           sentiment: "neutral",
-          summary: "Querying webhook support",
+          summary: "Migrated away two years ago",
           reasonCategory: "unknown",
-          switchingEvidence: "actively_switching",
-          explanation: "User asked about webhooks",
+          switchingEvidence: "actively_switching", // Deliberately incorrect model prediction
+          explanation: "Author migrated away in past",
+        },
+        {
+          id: "m-past-complaint",
+          about: "the_product",
+          sentiment: "negative",
+          summary: "Switched last year due to price",
+          reasonCategory: "pricing_value",
+          switchingEvidence: "actively_switching", // Deliberately incorrect model prediction
+          explanation: "Author switched last year",
         },
       ],
     });
 
     const verdicts = await classifyMentions("project-1", "Typeform", [
       {
-        id: "m-neutral-query",
-        title: "Webhook support query",
+        id: "m-past-neutral",
+        title: "Old transition",
         subreddit: "SaaS",
-        body: "Does Typeform support webhooks? Not switching, just asking for a client project.",
+        body: "We migrated away from Typeform two years ago, just sharing our experience.",
+      },
+      {
+        id: "m-past-complaint",
+        title: "Past pricing issue",
+        subreddit: "SaaS",
+        body: "We switched from Typeform to Tally last year because Typeform was too expensive.",
       },
     ]);
 
-    expect(verdicts.get("m-neutral-query")?.switchingEvidence).toBe("no_clear_signal");
+    expect(verdicts.get("m-past-neutral")?.switchingEvidence).toBe("no_clear_signal");
+    expect(verdicts.get("m-past-complaint")?.switchingEvidence).toBe("dissatisfied_no_switch");
   });
 });
 
