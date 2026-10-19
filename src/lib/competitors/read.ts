@@ -12,6 +12,7 @@ import { LEAD_AUTHOR, LEAD_AUTHOR_JOIN, LEAD_URL, NEED_AT } from "@/lib/leadSql"
 import { RETRIEVED_STATES } from "@/lib/scan/planStates";
 import { DAY_MS, daysAgo } from "@/lib/time";
 import { SENTIMENTS, type ReasonCategory, type Sentiment, type SwitchingEvidence } from "./classify";
+import { isSourceAuthorized } from "@/lib/sourcePolicy";
 
 /** The window the competitor screen shows, matching the feed window. */
 export const MENTION_WINDOW_DAYS = 30;
@@ -101,6 +102,9 @@ export async function countMentions(
   projectId: string,
   days = MENTION_WINDOW_DAYS,
 ): Promise<number> {
+  if (!isSourceAuthorized("reddit")) {
+    return 0;
+  }
   const rows = await db()
     .select({ total: count() })
     .from(competitorMentions)
@@ -125,6 +129,9 @@ export async function listMentions(
   projectId: string,
   days = MENTION_WINDOW_DAYS,
 ): Promise<MentionView[]> {
+  if (!isSourceAuthorized("reddit")) {
+    return [];
+  }
   const rows = await db()
     .select({
       id: competitorMentions.id,
@@ -173,6 +180,9 @@ export async function listMentions(
  * each once, in the order the project lists them. The detail pane's line.
  */
 export async function competitorsNamedIn(projectId: string, postId: string): Promise<string[]> {
+  if (!isSourceAuthorized("reddit")) {
+    return [];
+  }
   const rows = await db()
     .selectDistinct({ competitor: competitorMentions.competitor })
     .from(competitorMentions)

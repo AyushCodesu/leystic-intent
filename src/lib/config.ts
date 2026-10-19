@@ -137,6 +137,15 @@ const schema = z.object({
    * under the ten-connection pool. The pilot measures 429s at this value.
    */
   X_CALLS_IN_FLIGHT: z.coerce.number().int().positive().default(8),
+
+  /**
+   * Source authorization gate controls.
+   * Reddit is disabled by default unless explicitly enabled AND linked to a valid
+   * authorization record reference documented in docs/source-authorization-register.md.
+   */
+  REDDIT_SOURCE_ENABLED: z.preprocess(blankIsAbsent, bool),
+  REDDIT_AUTH_RECORD_ID: optional(z.string()),
+  X_AUTH_RECORD_ID: optional(z.string()),
 });
 
 export type Config = z.infer<typeof schema>;

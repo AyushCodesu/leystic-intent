@@ -12,6 +12,7 @@ import { LEAD_AUTHOR, LEAD_AUTHOR_JOIN, LEAD_BODY, LEAD_URL, NEED_AT, leadsBase 
 import { redditLeadNotMuted, xLeadNotMuted } from "@/lib/mutes";
 import { canonicalUrl, ownWords } from "@/lib/x/map";
 import { headlineOf } from "@/lib/x/read";
+import { isSourceAuthorized } from "@/lib/sourcePolicy";
 import { FRESH_SLACK_MS, type SelectableLead } from "./select";
 
 /**
@@ -24,6 +25,9 @@ import { FRESH_SLACK_MS, type SelectableLead } from "./select";
  * thread's own title, so a live send and a test agree.
  */
 export async function newLeadsSince(projectId: string, since: Date): Promise<SelectableLead[]> {
+  if (!isSourceAuthorized("reddit")) {
+    return [];
+  }
   const freshFrom = new Date(since.getTime() - FRESH_SLACK_MS);
   const rows = await leadsBase({
     id: leads.id,
@@ -73,6 +77,9 @@ export async function newLeadsSince(projectId: string, since: Date): Promise<Sel
  * own project row under an alias.
  */
 export function recentAlertableLeads(projectId: SQL, since: Date): SQL {
+  if (!isSourceAuthorized("reddit")) {
+    return sql`leads where false`;
+  }
   return sql`leads
     join reddit_posts on reddit_posts.id = leads.post_id
     left join reddit_comments on reddit_comments.id = leads.comment_id

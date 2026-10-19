@@ -21,6 +21,7 @@ import { LEAD_AUTHOR, LEAD_AUTHOR_JOIN, LEAD_BODY, LEAD_URL, NEED_AT, leadsBase 
 import { STAGES } from "./scan/questions";
 import { daysAgo } from "./time";
 import { assessLead, buildLearnedFeedOrder, getProjectLearningSnapshot } from "./learning";
+import { isSourceAuthorized } from "./sourcePolicy";
 
 import type {
   FeedFacets,
@@ -206,6 +207,9 @@ export async function listLeads(
   filter: FeedFilter,
   page?: FeedPage,
 ): Promise<FeedLead[]> {
+  if (!isSourceAuthorized("reddit")) {
+    return [];
+  }
   const snapshot = filter.order === "learned" ? await getProjectLearningSnapshot(projectId) : null;
   const orderItems =
     snapshot && snapshot.enoughEvidenceToPrioritize
@@ -235,6 +239,9 @@ export async function listLeads(
 
 /** How many leads those pills hold, which is what the list column counts. */
 export async function countLeads(projectId: string, filter: FeedFilter): Promise<number> {
+  if (!isSourceAuthorized("reddit")) {
+    return 0;
+  }
   const rows = await leadsBase({ total: count() }).where(feedWhere(projectId, filter));
   return rows[0]?.total ?? 0;
 }
@@ -279,6 +286,9 @@ export async function themeLinkLeads(
  * and none of the prose a row does.
  */
 export async function listLeadFaces(projectId: string, filter: FeedFilter): Promise<LeadFace[]> {
+  if (!isSourceAuthorized("reddit")) {
+    return [];
+  }
   const snapshot = filter.order === "learned" ? await getProjectLearningSnapshot(projectId) : null;
   const orderItems =
     snapshot && snapshot.enoughEvidenceToPrioritize
@@ -304,6 +314,9 @@ export async function listLeadFaces(projectId: string, filter: FeedFilter): Prom
  * pane has to open on it rather than falling back to the best lead.
  */
 export async function findLead(projectId: string, leadId: string): Promise<FeedLead | undefined> {
+  if (!isSourceAuthorized("reddit")) {
+    return undefined;
+  }
   const [rows, snapshot] = await Promise.all([
     feedQuery().where(and(eq(leads.projectId, projectId), eq(leads.id, leadId))),
     getProjectLearningSnapshot(projectId),
@@ -336,6 +349,9 @@ export async function listReviewItems(
   days: FeedWindow,
   at?: string,
 ): Promise<ReviewItem[]> {
+  if (!isSourceAuthorized("reddit")) {
+    return [];
+  }
   const rows = await db()
     .select({
       id: leadEvaluations.id,

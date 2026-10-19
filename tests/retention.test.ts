@@ -39,8 +39,8 @@ describeDb("deleting expired posts", () => {
     const user = await makeUser();
     const project = await makeProject(user.id, { name: "HotelsAllow" });
 
-    const [led, ranked, loose] = await upsertPosts(
-      ["led", "ranked", "loose"].map((role) => ({
+    const [led, ranked, competitorTracked, loose] = await upsertPosts(
+      ["led", "ranked", "competitorTracked", "loose"].map((role) => ({
         id: `p${randomUUID().slice(0, 8)}`,
         subreddit: "philly",
         author: "asker",
@@ -57,24 +57,34 @@ describeDb("deleting expired posts", () => {
     await db()
       .insert(schema.seoOpportunities)
       .values({ projectId: project.id, keyword: "hotels that take under 21", postId: ranked.id });
+    await db()
+      .insert(schema.competitorMentions)
+      .values({
+        projectId: project.id,
+        competitor: "Hostelworld",
+        postId: competitorTracked.id,
+        quote: "Hostelworld has some options.",
+      });
 
-    return { db, schema, deleteExpiredPosts, inArray, project, led, ranked, loose };
+    return { db, schema, deleteExpiredPosts, inArray, project, led, ranked, competitorTracked, loose };
   }
 
-  it("keeps a post a lead or an SEO row still points at, and drops the rest", async () => {
-    const { db, schema, deleteExpiredPosts, inArray, led, ranked, loose } = await fixture();
+  it("keeps a post a lead, SEO row, or competitor mention still points at, and drops the rest", async () => {
+    const { db, schema, deleteExpiredPosts, inArray, led, ranked, competitorTracked, loose } =
+      await fixture();
 
     await deleteExpiredPosts(POSTS_NOW);
 
     const left = await db()
       .select({ id: schema.redditPosts.id })
       .from(schema.redditPosts)
-      .where(inArray(schema.redditPosts.id, [led.id, ranked.id, loose.id]));
-    expect(left.map((row) => row.id).sort()).toEqual([led.id, ranked.id].sort());
+      .where(inArray(schema.redditPosts.id, [led.id, ranked.id, competitorTracked.id, loose.id]));
+    expect(left.map((row) => row.id).sort()).toEqual([led.id, ranked.id, competitorTracked.id].sort());
   });
 
   it("works through more expired posts than one batch holds", async () => {
-    const { db, schema, deleteExpiredPosts, inArray, led, ranked, loose } = await fixture();
+    const { db, schema, deleteExpiredPosts, inArray, led, ranked, competitorTracked, loose } =
+      await fixture();
     const { upsertPosts } = await import("@/lib/reddit/store");
     const more = await upsertPosts(
       [1, 2, 3, 4].map((n) => ({
@@ -90,12 +100,12 @@ describeDb("deleting expired posts", () => {
 
     await deleteExpiredPosts(POSTS_NOW, 2);
 
-    const ids = [led.id, ranked.id, loose.id, ...more.map((post) => post.id)];
+    const ids = [led.id, ranked.id, competitorTracked.id, loose.id, ...more.map((post) => post.id)];
     const left = await db()
       .select({ id: schema.redditPosts.id })
       .from(schema.redditPosts)
       .where(inArray(schema.redditPosts.id, ids));
-    expect(left.map((row) => row.id).sort()).toEqual([led.id, ranked.id].sort());
+    expect(left.map((row) => row.id).sort()).toEqual([led.id, ranked.id, competitorTracked.id].sort());
   });
 
   /**

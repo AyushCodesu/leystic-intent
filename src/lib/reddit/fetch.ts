@@ -4,6 +4,7 @@ import { db } from "@/db";
 import { searchRuns, usageLedger } from "@/db/schema";
 import type { FundedClient, Funding } from "@/lib/anyapi";
 import { assertHouseDataUnderCap } from "@/lib/usage";
+import { assertSourceAuthorized, sourceForSku } from "@/lib/sourcePolicy";
 import { paced } from "./pace";
 /** One search_runs row per kind of thing we fetch, on Reddit or on Google. */
 export type FetchKind =
@@ -117,6 +118,10 @@ export async function recordUsage(input: {
  */
 export async function fetchShared<T>(input: SharedFetch<T>): Promise<SharedResult<T>> {
   const { ctx, kind, sku, normalizedQuery } = input;
+  const sourceId = sourceForSku(sku);
+  if (sourceId) {
+    assertSourceAuthorized(sourceId);
+  }
   const sort = input.sort ?? null;
   const timeframe = input.timeframe ?? null;
   const variant = input.variant ?? "";

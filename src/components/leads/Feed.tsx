@@ -25,6 +25,7 @@ import { verdictSentence } from "@/lib/scan/report";
 import { sweepShown, sweepStatus } from "@/lib/sweep";
 import { withParams } from "@/lib/url";
 import { getProjectLearningSnapshot } from "@/lib/learning";
+import { getSourcePolicy } from "@/lib/sourcePolicy";
 
 import type { StreamEntry } from "@/components/leads/stream";
 
@@ -147,6 +148,7 @@ async function openOn(
  * this to show it, and the thread the pane opens on.
  */
 export async function Feed({ user, project, activity, params: asked }: FeedProps) {
+  const redditPolicy = getSourcePolicy("reddit");
   const projectId = project.id;
   const page = await feedPage(projectId, feedFilter(asked), !asked.days && !asked.at);
   // An empty window nobody picked opened on the whole of time (see feedPage),
@@ -224,7 +226,16 @@ export async function Feed({ user, project, activity, params: asked }: FeedProps
           </div>
         )
       ) : null}
+
       {/* The pills ride in the strip's top line, so the two cost one row between them. */}
+      {!redditPolicy.enabled ? (
+        <div className="rounded-control border border-warning/40 bg-warning/10 px-3 py-2 text-small">
+          <strong className="text-warning">Reddit data source disabled:</strong>{" "}
+          <span className="text-fg-muted">
+            {redditPolicy.reason} Reddit leads and scans are paused until valid commercial authorization is recorded.
+          </span>
+        </div>
+      ) : null}
       {arriving && total === 0 ? null : (
         <PeopleStrip
           faces={faces}
@@ -249,7 +260,9 @@ export async function Feed({ user, project, activity, params: asked }: FeedProps
                 <ArrivingLeads />
               ) : total === 0 ? (
                 <p className="text-small p-3 text-fg-muted">
-                  {filter.status !== "new" ? (
+                  {!redditPolicy.enabled ? (
+                    "Reddit data source is disabled. Commercial authorization is missing or pending review."
+                  ) : filter.status !== "new" ? (
                     EMPTY_SENTENCE[filter.status]
                   ) : elsewhere > 0 ? (
                     <>

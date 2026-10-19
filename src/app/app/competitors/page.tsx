@@ -24,6 +24,7 @@ import {
   watchedCompetitors,
 } from "@/lib/competitors/read";
 import { requireActiveProject } from "@/lib/projects";
+import { getSourcePolicy } from "@/lib/sourcePolicy";
 
 type CompetitorsPageProps = { searchParams: Promise<{ project?: string; tab?: string }> };
 
@@ -73,10 +74,24 @@ export default async function CompetitorsPage({ searchParams }: CompetitorsPageP
     mentions: mentions.length,
   };
 
+  const redditPolicy = getSourcePolicy("reddit");
+
   // Keyed so switching projects mounts StartOnOpen again for the new one.
   return (
     <div key={project.id} className="flex flex-col gap-5">
       {last ? null : <StartOnOpen start={openCompetitorsAction.bind(null, project.id)} />}
+      {!redditPolicy.enabled ? (
+        <div className="rounded-card border border-warning/40 bg-warning/10 p-4 text-small">
+          <p style={{ fontWeight: 500 }} className="text-warning">
+            Reddit Source Access Disabled
+          </p>
+          <p className="mt-1 text-fg-muted">{redditPolicy.reason}</p>
+          <p className="mt-2 text-fg-muted">
+            Competitor mentions and switching evidence derived from Reddit are paused until
+            valid commercial authorization is recorded.
+          </p>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
           <h1 className="text-h2" style={{ fontWeight: 500 }}>
@@ -93,6 +108,11 @@ export default async function CompetitorsPage({ searchParams }: CompetitorsPageP
         <EmptyState
           title="No competitors yet"
           sentence="Add the products you compete with on the Product screen, then scan for what Reddit says about them."
+        />
+      ) : !redditPolicy.enabled ? (
+        <EmptyState
+          title="Reddit source disabled"
+          sentence="Commercial access to Reddit data is not authorized. Mentions, praise, limitations, and switcher signals cannot be displayed."
         />
       ) : (
         <>

@@ -20,3 +20,6 @@ deploy/
 
 # Conductor machine-local settings, which override the shared ones.
 .conductor/settings.local.toml
+
+.agents/
+skills-lock.json

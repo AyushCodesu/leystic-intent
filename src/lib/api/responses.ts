@@ -13,7 +13,8 @@ export type ApiErrorCode =
   | "not_found"
   | "invalid_request"
   | "rate_limited"
-  | "internal_error";
+  | "internal_error"
+  | "source_disabled";
 
 const STATUS: Record<ApiErrorCode, number> = {
   unauthorized: 401,
@@ -22,6 +23,7 @@ const STATUS: Record<ApiErrorCode, number> = {
   invalid_request: 400,
   rate_limited: 429,
   internal_error: 500,
+  source_disabled: 403,
 };
 
 /** An error a handler can throw from anywhere and have serialized once. */

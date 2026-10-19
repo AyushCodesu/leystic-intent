@@ -1,5 +1,6 @@
 import { RETENTION_DAYS } from "@/lib/tiers";
 import { xEnabledFor } from "@/lib/x/enabled";
+import { isSourceAuthorized } from "@/lib/sourcePolicy";
 import type { ApiCaller } from "./auth";
 import { parseLeadQuery } from "./leadsQuery";
 import { getApiLead, listApiLeads } from "./leadsRead";
@@ -69,11 +70,23 @@ export async function projectLeads(
   projectId: string,
   params: URLSearchParams,
 ) {
+  if (!isSourceAuthorized("reddit")) {
+    throw new ApiError(
+      "source_disabled",
+      "Reddit data source is disabled: commercial authorization is missing or pending review.",
+    );
+  }
   const row = await requireProject(caller.user.id, projectId);
   return listApiLeads(row.id, parseLeadQuery(params), feedWindowDays(caller));
 }
 
 export async function lead(caller: ApiCaller, leadId: string) {
+  if (!isSourceAuthorized("reddit")) {
+    throw new ApiError(
+      "source_disabled",
+      "Reddit data source is disabled: commercial authorization is missing or pending review.",
+    );
+  }
   const found = await getApiLead(caller.user.id, leadId);
   if (!found) {
     throw new ApiError("not_found", "No lead with that id.");
@@ -82,11 +95,23 @@ export async function lead(caller: ApiCaller, leadId: string) {
 }
 
 export async function projectSeoOpportunities(caller: ApiCaller, projectId: string) {
+  if (!isSourceAuthorized("reddit")) {
+    throw new ApiError(
+      "source_disabled",
+      "Reddit SEO opportunity tracking is disabled: commercial authorization is missing or pending review.",
+    );
+  }
   const row = await requireProject(caller.user.id, projectId);
   return { opportunities: await listApiSeoOpportunities(row.id) };
 }
 
 export async function projectPainThemes(caller: ApiCaller, projectId: string) {
+  if (!isSourceAuthorized("reddit")) {
+    throw new ApiError(
+      "source_disabled",
+      "Pain themes derived from Reddit are disabled: commercial authorization is missing or pending review.",
+    );
+  }
   const row = await requireProject(caller.user.id, projectId);
   return { themes: await listApiPainThemes(row.id) };
 }

@@ -9,6 +9,7 @@ import {
   subreddits,
 } from "@/db/schema";
 import type { Relevance } from "@/lib/discovery/label";
+import { isSourceAuthorized } from "@/lib/sourcePolicy";
 import type { RankingThread } from "./thread";
 
 /**
@@ -168,6 +169,9 @@ function conditions(filter: SeoFilter) {
  * whichever order the reader asked for, never the last word on it.
  */
 export async function listOpportunities(projectId: string, filter: SeoFilter) {
+  if (!isSourceAuthorized("reddit")) {
+    return [];
+  }
   const judged = verdicts(projectId);
   return db()
     .select({ ...columns, verdictRank: judged.rank })
@@ -202,6 +206,9 @@ export async function listOpportunities(projectId: string, filter: SeoFilter) {
  * and its community on every page of the app.
  */
 export async function countOpportunities(projectId: string): Promise<number> {
+  if (!isSourceAuthorized("reddit")) {
+    return 0;
+  }
   const rows = await db()
     .select({ total: count() })
     .from(seoOpportunities)
@@ -220,6 +227,9 @@ export async function countOpportunities(projectId: string): Promise<number> {
  * not offered as a filter that would show nothing.
  */
 export async function seoFacets(projectId: string, filter: SeoFilter = {}): Promise<SeoFacets> {
+  if (!isSourceAuthorized("reddit")) {
+    return { keywords: [], subreddits: [] };
+  }
   const rows = await db()
     .select({ keyword: seoOpportunities.keyword, subreddit: redditPosts.subreddit })
     .from(seoOpportunities)

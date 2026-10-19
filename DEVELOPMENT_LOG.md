@@ -554,3 +554,92 @@ Eliminate false-negative switching gaps in `guardSwitchingEvidence`. The previou
 * `npm run test`: 82 test files passed (791 tests passed, 278 skipped database tests), 0 failures.
 * `npm run build`: Production build succeeded with Next.js Turbopack in 2.8s.
 * Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all files.
+
+---
+
+## 15. P0: Establish Source Authorization Gate and Audit the Data Lifecycle
+
+**Date**: October 2026<br/>
+**Commit Target**: `feat: establish source authorization gate and audit data lifecycle`
+
+### 1. Objective
+Establish transparent source-data governance across all ingestion channels, document legal terms and commercial usage rights in `docs/source-authorization-register.md`, implement a typed, fail-closed technical authorization gate in the application layer, and audit the complete data retention and deletion lifecycle.
+
+Explicit Legal Boundary: Software gates enforce technical restrictions, isolate unauthorized sources, and prevent accidental data leakage or spend; they do NOT establish or constitute legal authorization. Written permissions, contracts, and legal risk decisions remain external requirements.
+
+### 2. Source-Data Flow Mapping and Authorization Register (`docs/source-authorization-register.md`)
+* **Comprehensive Flow Trace**:
+  * Mapped acquisition methods, endpoints, collected fields, storage tables, downstream consumers, and intended commercial use across five providers:
+    1. **Reddit (via AnyAPI gateway)**: Ingestion via keyword search, post detail, comment walk, and subreddit endpoints; stored in `reddit_posts`, `reddit_comments`, `reddit_authors`, `search_runs`; consumed by Leads Feed, Competitor Intelligence, SEO Opportunities, Alerts, Public API/MCP, and LLM classification.
+    2. **X / Twitter (via AnyAPI gateway)**: Ingestion via search and user profile endpoints; stored in `x_posts`, `x_authors`, `x_lanes`; consumed by X Leads Tab and Alerts.
+    3. **Google Search (SERP via AnyAPI gateway)**: Query endpoint for search discovery; stored in `serp_results`, `search_runs`; used for SEO candidate ranking and thread discovery.
+    4. **Customer Website Web Crawler**: In-house connection-pinned crawler with SSRF and DNS-rebinding protection; extracts buyer-facing copy to populate project facts.
+    5. **LLM Inference Providers (Typesafe Jev via AI Gateway, OpenRouter fallback)**: Evaluates buyer intent, SEO relevance, and competitor switching reasons; outputs stored in `leads`, `lead_evaluations`, `seo_opportunities`, `competitor_mentions`.
+* **Commercial Status Determinations**:
+  * **Reddit**: `BLOCKED` (Launch Blocker). Reddit terms prohibit commercial SaaS indexing and redistribution without direct Reddit developer licensing. AnyAPI access does not confer Reddit commercial rights.
+  * **X / Twitter**: `PENDING` (Pilot Review). Evaluated under AnyAPI terms pending enterprise licensing.
+  * **Google SERP**: `APPROVED`. Public search indexing queries; downstream Reddit viewing subject to the Reddit gate.
+  * **Website Crawler**: `APPROVED`. First-party audit of customer-configured domains with security pinning.
+  * **LLM Inference**: `APPROVED`. Standard API terms; commercial output ownership granted.
+
+### 3. Typed Fail-Closed Source Policy Layer (`src/lib/sourcePolicy.ts`, `src/lib/config.ts`)
+* **Environment Configuration**:
+  * Added `REDDIT_SOURCE_ENABLED` (boolean, default `false`).
+  * Added `REDDIT_AUTH_RECORD_ID` (optional string).
+  * Added `X_AUTH_RECORD_ID` (optional string).
+* **Fail-Closed Policy Resolution (`getSourcePolicy`)**:
+  * Commercial Reddit access is disabled by default (`status: "BLOCKED"`, `enabled: false`).
+  * If `REDDIT_SOURCE_ENABLED=true` but `REDDIT_AUTH_RECORD_ID` is missing, empty, or a placeholder (`none`, `pending`, `unverified`, `todo`, `test`, `null`, `false`), the policy fails closed (`status: "BLOCKED"`, `enabled: false`).
+  * Setting a flag alone cannot bypass the gate; a verified external authorization record reference from the register is required.
+  * `assertSourceAuthorized(sourceId)` throws `SourceUnauthorizedError` with diagnostic reason and record id when access is denied.
+* **Technical Enforcement Seam (`src/lib/reddit/fetch.ts`)**:
+  * Enforced at the top of `fetchShared` before `findRun` (preventing cached run reuse) and before `buy` (preventing paid AnyAPI network requests).
+  * SKU prefix resolution (`sourceForSku`) maps `reddit.*` to `reddit`, `twitter.*` to `x`, and `google.*` to `google_serp`.
+
+### 4. Serving Path Fail-Closed Gating and Transparent UI States
+* **Competitor Intelligence (`src/lib/competitors/read.ts`, `src/lib/competitors/scan.ts`, `src/app/app/competitors/page.tsx`)**:
+  * `listMentions`, `countMentions`, and `competitorsNamedIn` return empty collections immediately when Reddit is unauthorized.
+  * `runCompetitorScan` skips execution gracefully, logs progress, and reschedules next run without failing.
+  * Competitors UI displays a prominent banner explaining that Reddit competitor intelligence is disabled pending commercial authorization, with reference to `docs/source-authorization-register.md`.
+* **Leads Feed (`src/lib/leads.ts`, `src/components/leads/Feed.tsx`)**:
+  * `listLeads`, `countLeads`, `listLeadFaces`, `findLead`, and `listReviewItems` fail closed.
+  * Leads Feed displays an amber informational banner rather than falsely claiming no leads exist for the project.
+* **SEO Opportunities (`src/lib/seo/read.ts`, `src/app/app/seo/page.tsx`)**:
+  * `listOpportunities`, `countOpportunities`, and `seoFacets` return empty collections.
+  * SEO UI displays a clear disabled-state banner and informational callout.
+* **Alerts Engine (`src/lib/alerts/leads.ts`)**:
+  * `newLeadsSince` and `recentAlertableLeads` return empty collections.
+  * Independent X alerts (`newXLeadsSince`) remain completely unaffected and operational.
+* **Public API and MCP Handlers (`src/lib/api/handlers.ts`, `src/lib/api/responses.ts`)**:
+  * Added `source_disabled` error code (HTTP 403) with zero-cost response header (`X-Request-Cost-Usd: 0`).
+  * Handlers for `projectLeads`, `lead`, `projectSeoOpportunities`, and `projectPainThemes` reject with HTTP 403 `source_disabled` when Reddit is disabled.
+
+### 5. Data Retention Engine and Deletion Audit (`src/lib/retention.ts`)
+* **Cascade Loss Protection**:
+  * `competitor_mentions` table has `onDelete: cascade` foreign key to `reddit_posts`.
+  * Updated `deleteExpiredPosts` to include `notExists(from(competitorMentions))` in eligibility query, preventing tracked competitor mentions from being wiped when expired posts are pruned.
+* **Read-Only Retention Auditor (`auditRetention`)**:
+  * Computes a comprehensive breakdown across all tables: `redditPosts` (total, unexpired, expired, retained by leads, retained by SEO, retained by competitor mentions, eligible for deletion), `redditComments`, `redditAuthors`, `competitorMentions`, `searchRuns`, and `xData`.
+  * Documents the 6 key operational limitations: lack of upstream AnyAPI/Reddit deletion webhooks, author profile detachment from post cascades, search run financial ledger auditability, retention of referenced posts, and operator approval requirement for destructive purges.
+* **Safe Dry-Run Modes**:
+  * Added `options.dryRun` parameter to `deleteExpiredPosts` and `pruneFinishedJobs`.
+
+### 6. Regression Testing (`tests/sourceAuthorizationGate.test.ts`, `tests/retention.test.ts`)
+* **Unit and Integration Coverage**:
+  * Default fail-closed policy verification for Reddit commercial access.
+  * Rejection of flag-only enablement without record ID, and rejection of all placeholder record IDs.
+  * Verification of valid authorization record ID producing `APPROVED` status.
+  * Technical gate verification at `fetchShared`: throws `SourceUnauthorizedError` and makes zero AnyAPI calls.
+  * Serving path fail-closed tests across Competitors, Leads, SEO, and Alerts.
+  * API handler tests verifying HTTP 403 `source_disabled` responses.
+  * Retention audit report structure and limitations verification.
+  * Database-backed test confirming `competitorMentions` cascade protection during expired post deletion.
+
+### 7. Verification Results
+* `tests/sourceAuthorizationGate.test.ts`: 14 unit tests passed (3 database tests skipped when DB is offline).
+* `npm run typecheck`: 0 errors.
+* `npm run lint`: 0 problems (0 errors, 0 warnings).
+* `npm test`: 83 test files passed (805 tests passed, 281 skipped database tests), 0 failures.
+* `npm run build`: Production build succeeded with Next.js Turbopack (35 static and dynamic routes compiled).
+* `git diff --check`: 0 whitespace errors.
+* Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all files.

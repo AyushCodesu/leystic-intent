@@ -15,6 +15,7 @@ import { requireActiveProject } from "@/lib/projects";
 import { listOpportunities, NO_PHRASINGS_PROGRESS, seoFacets, toThread } from "@/lib/seo/read";
 import { scoreThreads } from "@/lib/seo/score";
 import { orderThreads, seoOrder, seoView, worthReplying, type SeoOrder } from "@/lib/seo/views";
+import { getSourcePolicy } from "@/lib/sourcePolicy";
 import { withParams } from "@/lib/url";
 
 type SeoParams = {
@@ -97,10 +98,23 @@ export default async function SeoPage({ searchParams }: SeoPageProps) {
   const selected = threads.find((thread) => thread.id === params.thread) ?? threads[0] ?? null;
   const asked = selected !== null && selected.id === params.thread;
 
+  const redditPolicy = getSourcePolicy("reddit");
+
   // Keyed so switching projects mounts StartOnOpen again for the new one.
   return (
     <div key={project.id} className="flex flex-col gap-5">
       {last ? null : <StartOnOpen start={openSeoAction.bind(null, project.id)} />}
+      {!redditPolicy.enabled ? (
+        <div className="rounded-card border border-warning/40 bg-warning/10 p-4 text-small">
+          <p style={{ fontWeight: 500 }} className="text-warning">
+            Reddit Source Data Disabled
+          </p>
+          <p className="mt-1 text-fg-muted">{redditPolicy.reason}</p>
+          <p className="mt-2 text-fg-muted">
+            Ranking Reddit thread tracking is paused until commercial authorization is recorded.
+          </p>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
           <h2 className="text-h2" style={{ fontWeight: 500 }}>
@@ -123,7 +137,12 @@ export default async function SeoPage({ searchParams }: SeoPageProps) {
       </div>
       <SeoFilters facets={facets} />
       {threads.length === 0 ? (
-        nothingToLookUp ? (
+        !redditPolicy.enabled ? (
+          <EmptyState
+            title="Reddit source disabled"
+            sentence="Commercial access to Reddit data is not authorized. Ranking Reddit threads cannot be displayed."
+          />
+        ) : nothingToLookUp ? (
           <NoPhrasings projectId={project.id} />
         ) : (
           <EmptyState title="Nothing ranked yet" sentence={EMPTY_SENTENCE} />

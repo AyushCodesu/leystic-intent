@@ -1,6 +1,16 @@
-import { and, eq, inArray, lt, notExists, sql } from "drizzle-orm";
+import { and, count, eq, exists, inArray, isNotNull, lt, notExists, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { leads, redditPosts, seoOpportunities } from "@/db/schema";
+import {
+  leads,
+  redditAuthors,
+  redditComments,
+  redditPosts,
+  searchRuns,
+  seoOpportunities,
+  xAuthors,
+  xPosts,
+} from "@/db/schema";
+import { competitorMentions } from "@/db/schema/competitors";
 import { daysAgo } from "./time";
 import { RETENTION_DAYS } from "./tiers";
 
@@ -26,38 +36,60 @@ export async function deleteInBatches(
   }
 }
 
+export type RetentionOptions = {
+  dryRun?: boolean;
+};
+
 /**
- * Drops shared Reddit posts past the retention window. A post someone is still
- * shown - a lead in a feed, a thread in the Reddit SEO tab - is kept however
- * old it is, because the age of a ranking thread is the whole point of it.
- * Comments and evaluations still go with the post, because they cascade.
+ * Drops shared Reddit posts past the retention window.
  *
- * A batch at a time, each its own statement: one delete over every expired
- * post ran for hours on 2026-09-30, holding locks that stalled the scans'
- * post upserts until they held the whole connection pool, and every page hung.
+ * Retention policy:
+ * - A post referenced by an active lead is retained.
+ * - A post referenced by an active SEO opportunity is retained.
+ * - A post referenced by competitor intelligence is retained to protect tracked mentions.
+ * - Eligible expired posts without active references are deleted in bounded batches.
+ * - If options.dryRun is true, reports count of eligible posts without deleting.
  */
 export async function deleteExpiredPosts(
   now = new Date(),
   batch = RETENTION_BATCH,
+  options: RetentionOptions = {},
 ): Promise<number> {
+  const cutoff = daysAgo(RETENTION_DAYS, now);
+
+  const retentionConditions = and(
+    lt(redditPosts.createdAt, cutoff),
+    notExists(
+      db().select({ one: sql`1` }).from(leads).where(eq(leads.postId, redditPosts.id)),
+    ),
+    notExists(
+      db()
+        .select({ one: sql`1` })
+        .from(seoOpportunities)
+        .where(eq(seoOpportunities.postId, redditPosts.id)),
+    ),
+    notExists(
+      db()
+        .select({ one: sql`1` })
+        .from(competitorMentions)
+        .where(eq(competitorMentions.postId, redditPosts.id)),
+    ),
+  );
+
+  if (options.dryRun) {
+    const rows = await db()
+      .select({ total: count() })
+      .from(redditPosts)
+      .where(retentionConditions);
+    return Number(rows[0]?.total ?? 0);
+  }
+
   const expired = db()
     .select({ id: redditPosts.id })
     .from(redditPosts)
-    .where(
-      and(
-        lt(redditPosts.createdAt, daysAgo(RETENTION_DAYS, now)),
-        notExists(
-          db().select({ one: sql`1` }).from(leads).where(eq(leads.postId, redditPosts.id)),
-        ),
-        notExists(
-          db()
-            .select({ one: sql`1` })
-            .from(seoOpportunities)
-            .where(eq(seoOpportunities.postId, redditPosts.id)),
-        ),
-      ),
-    )
+    .where(retentionConditions)
     .limit(batch);
+
   return deleteInBatches(async () => {
     const deleted = await db()
       .delete(redditPosts)
@@ -71,23 +103,33 @@ export async function deleteExpiredPosts(
 export const JOB_HISTORY_DAYS = 30;
 
 /**
- * Drops the queue's finished jobs once they are a month old. The newest
- * finished job of each kind for each project stays however old it is: pages
- * say when a project last ran something and how it ended (lastRunJob,
- * sweepStatus, the X tab, projectActivity), and the boot sweeps ask whether a
- * one-off ever ran for a project. A job not yet finished is never touched.
- *
- * The newest is both the last of them to start and the last to finish, and
- * both are kept. Two jobs of one kind for one project never run at once, so
- * those are nearly always one row; when they are not, keeping the two costs a
- * row and guesses at nothing. The instance-wide jobs, which have no project,
- * are one group per kind.
+ * Drops the queue's finished jobs once they are a month old.
  */
 export async function pruneFinishedJobs(
   now = new Date(),
   batch = RETENTION_BATCH,
+  options: RetentionOptions = {},
 ): Promise<number> {
   const cutoff = daysAgo(JOB_HISTORY_DAYS, now).toISOString();
+
+  if (options.dryRun) {
+    const rows = await db().execute<{ count: string }>(sql`
+      select count(*) as count from (
+        select id from (
+          select id, finished_at,
+            row_number() over (
+              partition by project_id, kind order by started_at desc nulls last
+            ) as by_start,
+            row_number() over (partition by project_id, kind order by finished_at desc) as by_finish
+          from jobs
+          where finished_at is not null
+        ) ranked
+        where finished_at < ${cutoff}::timestamptz and by_start > 1 and by_finish > 1
+      ) eligible
+    `);
+    return Number(rows[0]?.count ?? 0);
+  }
+
   return deleteInBatches(async () => {
     const deleted = await db().execute<{ id: string }>(sql`
       delete from jobs where id in (
@@ -107,4 +149,206 @@ export async function pruneFinishedJobs(
     `);
     return deleted.length;
   }, batch);
+}
+
+export type RetentionBreakdown = {
+  total: number;
+  unexpired: number;
+  expired: number;
+  retainedByLeads: number;
+  retainedBySeo: number;
+  retainedByCompetitorMentions: number;
+  eligibleForDeletion: number;
+};
+
+export type RetentionAuditReport = {
+  auditTimestamp: string;
+  retentionWindowDays: number;
+  cutoffDate: string;
+  redditPosts: RetentionBreakdown;
+  redditComments: {
+    total: number;
+  };
+  redditAuthors: {
+    total: number;
+  };
+  competitorMentions: {
+    total: number;
+    onExpiredPosts: number;
+  };
+  searchRuns: {
+    total: number;
+    completed: number;
+  };
+  xData: {
+    totalPosts: number;
+    expiredPosts: number;
+    totalAuthors: number;
+    expiredAuthors: number;
+  };
+  limitations: string[];
+};
+
+/**
+ * Computes an explicit, read-only retention audit and dry-run report.
+ * Does not perform destructive operations.
+ */
+export async function auditRetention(now = new Date()): Promise<RetentionAuditReport> {
+  const cutoff = daysAgo(RETENTION_DAYS, now);
+
+  const [
+    totalPostsRow,
+    expiredPostsRow,
+    retainedByLeadsRow,
+    retainedBySeoRow,
+    retainedByCompetitorRow,
+    eligiblePostsRow,
+    totalCommentsRow,
+    totalAuthorsRow,
+    totalMentionsRow,
+    mentionsOnExpiredRow,
+    totalRunsRow,
+    completedRunsRow,
+    totalXPostsRow,
+    expiredXPostsRow,
+    totalXAuthorsRow,
+    expiredXAuthorsRow,
+  ] = await Promise.all([
+    db().select({ count: count() }).from(redditPosts),
+    db().select({ count: count() }).from(redditPosts).where(lt(redditPosts.createdAt, cutoff)),
+    db()
+      .select({ count: count() })
+      .from(redditPosts)
+      .where(
+        and(
+          lt(redditPosts.createdAt, cutoff),
+          exists(db().select({ one: sql`1` }).from(leads).where(eq(leads.postId, redditPosts.id))),
+        ),
+      ),
+    db()
+      .select({ count: count() })
+      .from(redditPosts)
+      .where(
+        and(
+          lt(redditPosts.createdAt, cutoff),
+          notExists(db().select({ one: sql`1` }).from(leads).where(eq(leads.postId, redditPosts.id))),
+          exists(
+            db()
+              .select({ one: sql`1` })
+              .from(seoOpportunities)
+              .where(eq(seoOpportunities.postId, redditPosts.id)),
+          ),
+        ),
+      ),
+    db()
+      .select({ count: count() })
+      .from(redditPosts)
+      .where(
+        and(
+          lt(redditPosts.createdAt, cutoff),
+          notExists(db().select({ one: sql`1` }).from(leads).where(eq(leads.postId, redditPosts.id))),
+          notExists(
+            db()
+              .select({ one: sql`1` })
+              .from(seoOpportunities)
+              .where(eq(seoOpportunities.postId, redditPosts.id)),
+          ),
+          exists(
+            db()
+              .select({ one: sql`1` })
+              .from(competitorMentions)
+              .where(eq(competitorMentions.postId, redditPosts.id)),
+          ),
+        ),
+      ),
+    db()
+      .select({ count: count() })
+      .from(redditPosts)
+      .where(
+        and(
+          lt(redditPosts.createdAt, cutoff),
+          notExists(db().select({ one: sql`1` }).from(leads).where(eq(leads.postId, redditPosts.id))),
+          notExists(
+            db()
+              .select({ one: sql`1` })
+              .from(seoOpportunities)
+              .where(eq(seoOpportunities.postId, redditPosts.id)),
+          ),
+          notExists(
+            db()
+              .select({ one: sql`1` })
+              .from(competitorMentions)
+              .where(eq(competitorMentions.postId, redditPosts.id)),
+          ),
+        ),
+      ),
+    db().select({ count: count() }).from(redditComments),
+    db().select({ count: count() }).from(redditAuthors),
+    db().select({ count: count() }).from(competitorMentions),
+    db()
+      .select({ count: count() })
+      .from(competitorMentions)
+      .innerJoin(redditPosts, eq(redditPosts.id, competitorMentions.postId))
+      .where(lt(redditPosts.createdAt, cutoff)),
+    db().select({ count: count() }).from(searchRuns),
+    db().select({ count: count() }).from(searchRuns).where(isNotNull(searchRuns.completedAt)),
+    db().select({ count: count() }).from(xPosts),
+    db()
+      .select({ count: count() })
+      .from(xPosts)
+      .where(and(lt(xPosts.createdAt, cutoff), lt(xPosts.fetchedAt, cutoff))),
+    db().select({ count: count() }).from(xAuthors),
+    db().select({ count: count() }).from(xAuthors).where(lt(xAuthors.fetchedAt, cutoff)),
+  ]);
+
+  const totalPosts = Number(totalPostsRow[0]?.count ?? 0);
+  const expiredPosts = Number(expiredPostsRow[0]?.count ?? 0);
+  const unexpiredPosts = Math.max(0, totalPosts - expiredPosts);
+  const retainedByLeads = Number(retainedByLeadsRow[0]?.count ?? 0);
+  const retainedBySeo = Number(retainedBySeoRow[0]?.count ?? 0);
+  const retainedByCompetitorMentions = Number(retainedByCompetitorRow[0]?.count ?? 0);
+  const eligibleForDeletion = Number(eligiblePostsRow[0]?.count ?? 0);
+
+  return {
+    auditTimestamp: now.toISOString(),
+    retentionWindowDays: RETENTION_DAYS,
+    cutoffDate: cutoff.toISOString(),
+    redditPosts: {
+      total: totalPosts,
+      unexpired: unexpiredPosts,
+      expired: expiredPosts,
+      retainedByLeads,
+      retainedBySeo,
+      retainedByCompetitorMentions,
+      eligibleForDeletion,
+    },
+    redditComments: {
+      total: Number(totalCommentsRow[0]?.count ?? 0),
+    },
+    redditAuthors: {
+      total: Number(totalAuthorsRow[0]?.count ?? 0),
+    },
+    competitorMentions: {
+      total: Number(totalMentionsRow[0]?.count ?? 0),
+      onExpiredPosts: Number(mentionsOnExpiredRow[0]?.count ?? 0),
+    },
+    searchRuns: {
+      total: Number(totalRunsRow[0]?.count ?? 0),
+      completed: Number(completedRunsRow[0]?.count ?? 0),
+    },
+    xData: {
+      totalPosts: Number(totalXPostsRow[0]?.count ?? 0),
+      expiredPosts: Number(expiredXPostsRow[0]?.count ?? 0),
+      totalAuthors: Number(totalXAuthorsRow[0]?.count ?? 0),
+      expiredAuthors: Number(expiredXAuthorsRow[0]?.count ?? 0),
+    },
+    limitations: [
+      "AnyAPI gateway provides no webhooks or deletion events for user-deleted Reddit posts or comments.",
+      "Downstream records cannot detect upstream content removal without individual polling requests.",
+      "reddit_authors table is independent of reddit_posts cascades; author profiles remain stored until explicitly pruned.",
+      "search_runs rows are preserved indefinitely for financial ledger auditability and house budget cap verification.",
+      "Posts referenced by leads, seo_opportunities, or competitor_mentions are intentionally retained past thirty days.",
+      "Destructive historical purges require explicit operator approval; the automated scheduler runs only bounded batches.",
+    ],
+  };
 }
