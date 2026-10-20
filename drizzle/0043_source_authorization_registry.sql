@@ -21,7 +21,7 @@ CREATE INDEX IF NOT EXISTS "source_auth_records_status_idx" ON "source_auth_reco
 
 CREATE TABLE IF NOT EXISTS "source_auth_audit_events" (
   "id" text PRIMARY KEY NOT NULL,
-  "record_id" text NOT NULL REFERENCES "source_auth_records"("record_id") ON DELETE CASCADE,
+  "record_id" text NOT NULL REFERENCES "source_auth_records"("record_id") ON DELETE RESTRICT,
   "action" text NOT NULL,
   "performed_by" text NOT NULL,
   "actor_role" text NOT NULL,
@@ -35,6 +35,19 @@ CREATE TABLE IF NOT EXISTS "source_auth_audit_events" (
 
 CREATE INDEX IF NOT EXISTS "source_auth_audit_events_record_id_idx" ON "source_auth_audit_events" ("record_id");
 CREATE INDEX IF NOT EXISTS "source_auth_audit_events_created_at_idx" ON "source_auth_audit_events" ("created_at");
+
+-- Database-level immutability enforcement: audit trail is strictly append-only
+CREATE OR REPLACE FUNCTION prevent_source_auth_audit_events_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION 'source_auth_audit_events is an append-only audit ledger: UPDATE and DELETE operations are prohibited';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_prevent_source_auth_audit_events_mutation ON "source_auth_audit_events";
+CREATE TRIGGER trg_prevent_source_auth_audit_events_mutation
+BEFORE UPDATE OR DELETE ON "source_auth_audit_events"
+FOR EACH ROW EXECUTE FUNCTION prevent_source_auth_audit_events_mutation();
 
 -- Seed default authoritative records (DO NOT promote blocked or pending sources)
 INSERT INTO "source_auth_records" (

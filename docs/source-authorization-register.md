@@ -131,9 +131,17 @@ Every managed source is governed by an authoritative record in the trusted regis
    - `revoked_at` / `revoked_by`: timestamps and actor attribution for revocations.
    - `created_at` / `updated_at`: audit timestamps.
 
-2. **`source_auth_audit_events` Table**:
+2. **`source_auth_audit_events` Table & Append-Only Guarantees**:
    - Append-only transactional audit ledger recording every administrative mutation.
    - Tracks `id`, `record_id`, `action` (`REGISTER`, `UPDATE`, `APPROVE`, `REVOKE`), `performed_by`, `actor_role` (`system_administrator`, `compliance_officer`, `legal_counsel`), `evidence_reference`, `reason`, `previous_status`, `new_status`, `details`, and `created_at`.
+   - Foreign key to `source_auth_records` is configured with `ON DELETE RESTRICT`, preventing cascading deletion.
+   - Enforced by database trigger `prevent_source_auth_audit_events_mutation` prohibiting `UPDATE` and `DELETE` operations on `source_auth_audit_events`.
+
+3. **Authoritative PostgreSQL Runtime Initialization**:
+   - In production (`NODE_ENV === "production"`), the registry strictly instantiates `DrizzleSourceAuthStore` (`createDefaultSourceAuthStore()`) reading from PostgreSQL. Falling back to file-backed storage in production is prohibited.
+   - Hydration occurs during application server startup via `initSourcePolicyRegistry()` wired directly into `src/instrumentation.ts:register()`.
+   - If the durable store fails or is unreachable, the registry marks itself unhealthy and clears the cache, failing closed immediately. No stale approved cache entries are preserved.
+   - Cross-worker revocation consistency: revocation updates PostgreSQL durably and invalidates in-memory cache. Rehydration occurs automatically when the cache TTL expires or when `ensureFresh()` is called prior to protected operations.
 
 ```ts
 export type TrustedAuthRecord = {
@@ -170,11 +178,11 @@ Software treats this registry as the sole source of truth. Setting an environmen
 
 ### Operator Authorization Boundary & Unblock Protection
 
-1. **Mandatory Operator Context**:
+1. **Mandatory Operator Context & Production Secret**:
    - Administrative mutations (`operatorApproveRecord`, `operatorRevokeRecord`, `operatorRegisterRecord`) require an explicit `OperatorContext`:
-     * `operatorId`: non-empty operator identifier.
+     * `operatorId`: non-empty verified operator identifier (anonymous identities such as "anon" are rejected in production).
      * `role`: strictly controlled role: `system_administrator`, `compliance_officer`, or `legal_counsel`.
-     * `operatorKey`: optional credential verified against `OPERATOR_SECRET_KEY` when configured.
+     * `operatorKey`: in production (`NODE_ENV === "production"`), `OPERATOR_SECRET_KEY` must be configured in the environment and must match `operatorKey`. If unconfigured or mismatched, mutations fail closed with `OperatorAuthorizationError`.
    - Arbitrary runtime code, unauthenticated web requests, and background jobs cannot mutate registry state.
 
 2. **Unblock Protection Invariants**:
@@ -206,7 +214,7 @@ Software treats this registry as the sole source of truth. Setting an environmen
    | `x_search` | `twitter.search` | `x_search` | `social_intent_monitoring` | `search_discovery` |
    | `x_tweet` | `twitter.tweet` | `x_tweet` | `social_intent_monitoring` | `social_content_read` |
    | `x_profile` | `twitter.profile` | `x_profile` | `social_intent_monitoring` | `profile_metadata_read` |
-   | `website_crawl` | N/A (crawler) | N/A | `customer_website_coverage` | `customer_domain_crawl` |
+   | `website_crawl` | `website.crawl` | `website_crawl` | `customer_website_coverage` | `customer_domain_crawl` |
 
    If any acquisition path lacks explicit purpose or scope context, or if an unpermitted combination is requested, `operationForFetch()` immediately throws `SourceUnauthorizedError` and fails closed before cache or network operations.
 

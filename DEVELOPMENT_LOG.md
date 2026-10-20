@@ -870,3 +870,54 @@ Explicit Legal Boundary: Software gates enforce technical restrictions, isolate 
 * `npm run build`: Production build passed (35 static and dynamic routes compiled).
 * `git diff --check`: 0 whitespace errors.
 * External Legal Notice: Software gates enforce technical restrictions only; external contracts with data providers remain required.
+
+---
+
+## 11. Durable Registry Activation & Runtime Control Hardening
+
+### 1. Authoritative PostgreSQL Store in Production (`src/lib/sourcePolicy.ts`, `src/instrumentation.ts`)
+* **Authoritative Production Wiring**:
+  * `createDefaultSourceAuthStore()` returns `DrizzleSourceAuthStore` whenever `process.env.NODE_ENV === "production"`. Silent fallback to file storage in production is prohibited.
+  * Server bootstrap hydration: `src/instrumentation.ts` invokes `initSourcePolicyRegistry()` on server startup in the Node.js runtime, hydrating the cache directly from PostgreSQL before any protected access or background worker executes.
+  * Fail-closed on store unavailability: If the database is unreachable, offline, or returns an error during synchronization, `SourcePolicyRegistry` immediately clears its cache, sets `storeHealthy = false`, and returns `status: "BLOCKED"` ("Durable authorization store is unreachable, failed validation, or is offline; access denied fail-closed."). No stale approved entries are retained.
+  * Cross-worker revocation consistency: Revocations persist transactionally in PostgreSQL and invalidate local cache. Cache TTL expiration (`isCacheExpired`) and calls to `ensureFresh()` rehydrate from PostgreSQL so all runtime instances and workers observe revocations.
+
+### 2. Append-Only Audit Ledger & Cascade Protection (`src/db/schema/sourceAuth.ts`, `drizzle/0043_source_authorization_registry.sql`)
+* **Foreign Key Restriction**:
+  * Changed foreign key on `source_auth_audit_events.recordId` to `references(() => sourceAuthRecords.recordId, { onDelete: "restrict" })`.
+  * Cascading deletions cannot erase historical audit events if an authorization record is deleted or modified.
+* **Database-Level Mutation Guard**:
+  * Added PostgreSQL trigger `prevent_source_auth_audit_events_mutation` in `drizzle/0043_source_authorization_registry.sql` raising an exception on any `UPDATE` or `DELETE` statement targeting `source_auth_audit_events`.
+
+### 3. Operator Authentication & Production Secret Enforcement
+* **Mandatory Secret Verification in Production**:
+  * In `assertAuthorizedOperator()`: when `NODE_ENV === "production"`, `process.env.OPERATOR_SECRET_KEY` must be configured and match `context.operatorKey`. If missing or mismatched, mutations throw `OperatorAuthorizationError`.
+  * Anonymous ("anon") or unverified identities are rejected in production.
+  * `registerTrustedAuthRecord` without valid `OperatorContext` throws `OperatorAuthorizationError` in production.
+
+### 4. Strict 5-Field Operation Binding (`src/lib/reddit/fetch.ts`, `src/lib/sourcePolicy.ts`)
+* **5-Field Alignment Invariant**:
+  * Every acquisition operation definition in `ACQUISITION_OPERATIONS` defines `operationId`, `sourceId`, `sku`, `kind`, `purpose`, and `scope`.
+  * `operationForFetch()` and `isPermittedAcquisitionOperation()` strictly enforce that `operationId`, `sku`, `kind`, `purpose`, and `scope` align.
+  * Mismatched combinations (e.g. `reddit.post` or fetch kind `post` attempting to use `lead_search`) fail closed with `SourceUnauthorizedError`.
+  * Caller attempts to override purpose or scope defined for an operation are rejected.
+  * Downstream callers (`fetchShared`, `crawlWebsiteInventory`, `runCompetitorScan`, `runXScan`, and read queries) call `ensureSourcePolicyFresh()` before verifying authorization.
+
+### 5. Truthful Retention Behavior Preserved (`src/lib/retention.ts`)
+* `planHistoricalPurge` and `purgeHistoricalData` accept `operatorContext?: OperatorContext`, verify operator authorization if provided, and require `operatorApprovalConfirmed: true`.
+* Truthfully reports `isImplemented: false` and `status: "deferred_not_implemented"` with 0 rows purged.
+
+### 6. 12 Regression Tests Passing Cleanly (`tests/sourceAuthorizationGate.test.ts`)
+1. Production bootstrap selects the PostgreSQL registry rather than a fallback file.
+2. Durable records survive restart simulations across independent runtime instances.
+3. Database failure prevents protected access; authorization fails closed rather than falling back to an unverified cache.
+4. Cache expiry and invalidation work as documented across runtime instances and processes.
+5. Fabricated operator contexts cannot approve or revoke records in production, including when secrets are absent.
+6. Only an authenticated operator with an appropriate role can perform each type of mutation.
+7. Operation identifiers match their exact SKU and fetch kind.
+8. A valid operation mapping cannot authorize a different workflow.
+9. Cache reuse cannot bypass a new operation's purpose or scope requirements.
+10. The audit ledger survives record state changes, and no ordinary registry operation or cascade deletion can erase audit events.
+11. Routine TTL behavior remains intact and historical purge behavior matches its honest status.
+12. Reddit, X, and scraped Google SERP remain blocked or pending under the current register.
+

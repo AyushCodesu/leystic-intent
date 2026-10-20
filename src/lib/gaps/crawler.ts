@@ -5,7 +5,7 @@ import {
   MAX_SITEMAP_BYTES,
 } from "./constants";
 import { extractPageMetadata, parseRobotsTxt, parseSitemapXml } from "./html";
-import { assertSourceAuthorized } from "@/lib/sourcePolicy";
+import { assertSourceAuthorized, ensureSourcePolicyFresh } from "@/lib/sourcePolicy";
 import { safeFetch, validateSafeUrl } from "./security";
 import type { DnsResolver, SafeHttpTransport } from "./security";
 import type { InspectedPage, PageInventoryResult } from "./types";
@@ -44,7 +44,9 @@ export async function crawlWebsiteInventory(
   rootUrl: string,
   options: CrawlOptions = {},
 ): Promise<PageInventoryResult> {
+  await ensureSourcePolicyFresh();
   assertSourceAuthorized({
+    operationId: "website_crawl",
     sourceId: "website_crawler",
     purpose: "customer_website_coverage",
     scope: "customer_domain_crawl",

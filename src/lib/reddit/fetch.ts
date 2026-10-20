@@ -5,7 +5,10 @@ import { searchRuns, usageLedger } from "@/db/schema";
 import type { FundedClient, Funding } from "@/lib/anyapi";
 import { assertHouseDataUnderCap } from "@/lib/usage";
 import {
+  ACQUISITION_OPERATIONS,
   assertSourceAuthorized,
+  ensureSourcePolicyFresh,
+  findAcquisitionOperation,
   isPermittedAcquisitionOperation,
   sourceForSku,
   SourceUnauthorizedError,
@@ -70,15 +73,45 @@ export function operationForFetch(input: {
     );
   }
 
-  if (!isPermittedAcquisitionOperation(input.sku, input.kind, purpose, scope)) {
-    throw new SourceUnauthorizedError(
-      sourceId,
-      `Unpermitted operation context for SKU '${input.sku}': purpose '${purpose}' with scope '${scope}' is not an authorized acquisition path.`,
-      "BLOCKED",
-    );
+  const operationId = input.operation?.operationId;
+  if (operationId) {
+    const def = ACQUISITION_OPERATIONS[operationId];
+    if (!def) {
+      throw new SourceUnauthorizedError(
+        sourceId,
+        `Unknown operationId '${operationId}' for acquisition SKU '${input.sku}'.`,
+        "BLOCKED",
+      );
+    }
+    if (
+      def.sku !== input.sku ||
+      def.kind !== input.kind ||
+      def.purpose !== purpose ||
+      def.scope !== scope ||
+      def.sourceId !== sourceId
+    ) {
+      throw new SourceUnauthorizedError(
+        sourceId,
+        `Mismatched operation context for operationId '${operationId}': expected SKU '${def.sku}', kind '${def.kind}', purpose '${def.purpose}', scope '${def.scope}', got SKU '${input.sku}', kind '${input.kind}', purpose '${purpose}', scope '${scope}'.`,
+        "BLOCKED",
+      );
+    }
+  } else {
+    if (!isPermittedAcquisitionOperation(input.sku, input.kind, purpose, scope)) {
+      throw new SourceUnauthorizedError(
+        sourceId,
+        `Unpermitted operation context for SKU '${input.sku}': purpose '${purpose}' with scope '${scope}' (kind: '${input.kind}') is not an authorized acquisition path.`,
+        "BLOCKED",
+      );
+    }
   }
 
+  const resolvedOp = operationId
+    ? ACQUISITION_OPERATIONS[operationId]
+    : findAcquisitionOperation(input.sku, input.kind, purpose, scope);
+
   return {
+    operationId: resolvedOp?.operationId,
     sourceId,
     purpose,
     scope,
@@ -164,6 +197,7 @@ export async function recordUsage(input: {
  * makes it; Google has its own vendor and is not paced here.
  */
 export async function fetchShared<T>(input: SharedFetch<T>): Promise<SharedResult<T>> {
+  await ensureSourcePolicyFresh();
   const operation = operationForFetch(input);
   assertSourceAuthorized(operation);
   const { ctx, kind, sku, normalizedQuery } = input;

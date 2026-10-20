@@ -9,9 +9,14 @@ import {
   subreddits,
 } from "@/db/schema";
 import type { Relevance } from "@/lib/discovery/label";
-import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
+import {
+  ensureSourcePolicyFresh,
+  isSourceAuthorized,
+  type SourceOperationRequest,
+} from "@/lib/sourcePolicy";
 
 const SEO_READ_OP: SourceOperationRequest = {
+  operationId: "seo_post",
   sourceId: "reddit",
   purpose: "seo_opportunity_discovery",
   scope: "social_content_read",
@@ -175,6 +180,7 @@ function conditions(filter: SeoFilter) {
  * whichever order the reader asked for, never the last word on it.
  */
 export async function listOpportunities(projectId: string, filter: SeoFilter) {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(SEO_READ_OP)) {
     return [];
   }
@@ -212,6 +218,7 @@ export async function listOpportunities(projectId: string, filter: SeoFilter) {
  * and its community on every page of the app.
  */
 export async function countOpportunities(projectId: string): Promise<number> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(SEO_READ_OP)) {
     return 0;
   }
@@ -233,6 +240,7 @@ export async function countOpportunities(projectId: string): Promise<number> {
  * not offered as a filter that would show nothing.
  */
 export async function seoFacets(projectId: string, filter: SeoFilter = {}): Promise<SeoFacets> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(SEO_READ_OP)) {
     return { keywords: [], subreddits: [] };
   }

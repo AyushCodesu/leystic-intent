@@ -21,9 +21,14 @@ import { LEAD_AUTHOR, LEAD_AUTHOR_JOIN, LEAD_BODY, LEAD_URL, NEED_AT, leadsBase 
 import { STAGES } from "./scan/questions";
 import { daysAgo } from "./time";
 import { assessLead, buildLearnedFeedOrder, getProjectLearningSnapshot } from "./learning";
-import { isSourceAuthorized, type SourceOperationRequest } from "./sourcePolicy";
+import {
+  ensureSourcePolicyFresh,
+  isSourceAuthorized,
+  type SourceOperationRequest,
+} from "./sourcePolicy";
 
 const REDDIT_LEADS_READ_OP: SourceOperationRequest = {
+  operationId: "lead_post",
   sourceId: "reddit",
   purpose: "commercial_lead_generation",
   scope: "social_content_read",
@@ -213,6 +218,7 @@ export async function listLeads(
   filter: FeedFilter,
   page?: FeedPage,
 ): Promise<FeedLead[]> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(REDDIT_LEADS_READ_OP)) {
     return [];
   }
@@ -245,6 +251,7 @@ export async function listLeads(
 
 /** How many leads those pills hold, which is what the list column counts. */
 export async function countLeads(projectId: string, filter: FeedFilter): Promise<number> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(REDDIT_LEADS_READ_OP)) {
     return 0;
   }
@@ -292,6 +299,7 @@ export async function themeLinkLeads(
  * and none of the prose a row does.
  */
 export async function listLeadFaces(projectId: string, filter: FeedFilter): Promise<LeadFace[]> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(REDDIT_LEADS_READ_OP)) {
     return [];
   }
@@ -320,6 +328,7 @@ export async function listLeadFaces(projectId: string, filter: FeedFilter): Prom
  * pane has to open on it rather than falling back to the best lead.
  */
 export async function findLead(projectId: string, leadId: string): Promise<FeedLead | undefined> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(REDDIT_LEADS_READ_OP)) {
     return undefined;
   }
@@ -355,6 +364,7 @@ export async function listReviewItems(
   days: FeedWindow,
   at?: string,
 ): Promise<ReviewItem[]> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(REDDIT_LEADS_READ_OP)) {
     return [];
   }

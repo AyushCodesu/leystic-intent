@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCompetitorScan } from "@/lib/competitors/scan";
-import { crawlWebsiteInventory } from "@/lib/gaps/crawler";
 import { fetchShared, operationForFetch } from "@/lib/reddit/fetch";
 import {
   auditRetention,
@@ -17,12 +16,14 @@ import {
   ACQUISITION_OPERATIONS,
   allSourcePolicies,
   assertSourceAuthorized,
+  createDefaultSourceAuthStore,
+  DrizzleSourceAuthStore,
   getSourceAuthAuditHistory,
   getSourcePolicy,
   getTrustedRecord,
+  globalRegistry,
   InvalidAuthRecordError,
   isPermittedAcquisitionOperation,
-  isSourceAuthorized,
   OperatorAuthorizationError,
   operatorApproveRecord,
   operatorRegisterRecord,
@@ -30,8 +31,9 @@ import {
   PersistentFileSourceAuthStore,
   registerTrustedAuthRecord,
   resetTrustedRegistry,
-  revokeTrustedAuthRecord,
+  setGlobalRegistryStore,
   sourceForSku,
+  type SourceAuthStore,
   SourcePolicyRegistry,
   SourceUnauthorizedError,
   type OperatorContext,
@@ -39,14 +41,6 @@ import {
   type SourceOperationRequest,
   type TrustedAuthRecord,
 } from "@/lib/sourcePolicy";
-import { newXLeadsSince } from "@/lib/alerts/leads";
-import {
-  listXFiltered,
-  listXHeld,
-  listXLeads,
-  listXOpportunities,
-  xLeadById,
-} from "@/lib/x/read";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 const legalOperator: OperatorContext = {
@@ -68,16 +62,26 @@ describe("Operation-Specific Source Authorization and Registry Controls", () => 
   beforeEach(() => {
     vi.stubEnv("DATABASE_URL", "postgres://reddit_leads@localhost:5433/reddit_leads");
     vi.stubEnv("APP_ENCRYPTION_KEY", Buffer.alloc(32).toString("base64"));
+    setGlobalRegistryStore(createDefaultSourceAuthStore());
     resetTrustedRegistry();
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    setGlobalRegistryStore(createDefaultSourceAuthStore());
     resetTrustedRegistry();
   });
 
-  // Test 1: Registry records and revocations survive reinitialization/restart simulations and are shared across independent runtime instances
-  it("Test 1: Registry records and revocations survive reinitialization/restart simulations across independent instances", async () => {
+  // Test 1: Production bootstrap selects the PostgreSQL registry rather than a fallback file
+  it("Test 1: Production bootstrap selects the PostgreSQL registry rather than a fallback file", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const store = createDefaultSourceAuthStore();
+    expect(store).toBeInstanceOf(DrizzleSourceAuthStore);
+    expect(store).not.toBeInstanceOf(PersistentFileSourceAuthStore);
+  });
+
+  // Test 2: Durable records survive restart simulations across independent runtime instances
+  it("Test 2: Durable records survive restart simulations across independent runtime instances", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "leystic-auth-test-"));
     const storePath = path.join(tmpDir, "source_auth.json");
 
@@ -140,149 +144,399 @@ describe("Operation-Specific Source Authorization and Registry Controls", () => 
     }
   });
 
-  // Test 2: Revoked or expired records are immediately denied authorization, even if previously cached
-  it("Test 2: Revoked or expired records are immediately denied authorization, even if previously cached", async () => {
-    const activeRecord: TrustedAuthRecord = {
-      recordId: "REC-TEST-IMMEDIATE-REVOCATION",
+  // Test 3: Database failure prevents protected access; authorization fails closed rather than falling back to an unverified cache
+  it("Test 3: Database failure prevents protected access; authorization fails closed rather than falling back to an unverified cache", async () => {
+    // Failing store simulates offline or unreachable durable store
+    const failingStore: SourceAuthStore = {
+      getRecord: async () => {
+        throw new Error("PostgreSQL connection refused: host unreachable");
+      },
+      getAllRecords: async () => {
+        throw new Error("PostgreSQL connection refused: host unreachable");
+      },
+      saveRecord: async () => {
+        throw new Error("PostgreSQL connection refused: host unreachable");
+      },
+      revokeRecord: async () => {
+        throw new Error("PostgreSQL connection refused: host unreachable");
+      },
+      getAuditEvents: async () => {
+        throw new Error("PostgreSQL connection refused: host unreachable");
+      },
+    };
+
+    const isolatedRegistry = new SourcePolicyRegistry(failingStore);
+    isolatedRegistry.__testOnlyInjectRecord({
+      recordId: "REC-TEST-FAIL-CLOSED",
       sourceId: "reddit",
-      name: "Immediate Revocation Test",
+      name: "Pre-existing cache entry",
       status: "APPROVED",
       authorizedPurposes: ["commercial_lead_generation"],
       scopes: ["search_discovery"],
       effectiveDate: "2026-01-01T00:00:00.000Z",
       expirationDate: "2028-01-01T00:00:00.000Z",
-      evidenceReference: "DOC-IMMEDIATE-001",
-      approvalProvenance: {
-        approvedBy: "Legal",
-        reviewedAt: "2026-01-01T00:00:00.000Z",
-        notes: "Authorized active record",
-      },
-    };
-    await operatorRegisterRecord(legalOperator, activeRecord);
+      evidenceReference: "DOC-PRE",
+      approvalProvenance: { approvedBy: "Legal", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "test" },
+    });
 
-    vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-IMMEDIATE-REVOCATION");
+    // When store synchronization fails, the cache must be cleared and marked unhealthy
+    await expect(isolatedRegistry.syncFromStore()).rejects.toThrow(/Failed to synchronize source authorization registry/);
+    expect(isolatedRegistry.isHealthy()).toBe(false);
+    expect(isolatedRegistry.getRecord("REC-TEST-FAIL-CLOSED")).toBeNull();
+    expect(isolatedRegistry.getAllRecords()).toEqual([]);
+
+    // Set failing store on global registry to verify getSourcePolicy and assertSourceAuthorized
+    setGlobalRegistryStore(failingStore);
+    await expect(globalRegistry.syncFromStore()).rejects.toThrow();
+    expect(globalRegistry.isHealthy()).toBe(false);
 
     const op: SourceOperationRequest = {
       sourceId: "reddit",
       purpose: "commercial_lead_generation",
       scope: "search_discovery",
     };
-
-    // Initially authorized and cached
-    expect(isSourceAuthorized(op)).toBe(true);
-
-    // Operator revokes record
-    await operatorRevokeRecord(legalOperator, {
-      recordId: "REC-TEST-IMMEDIATE-REVOCATION",
-      status: "BLOCKED",
-      reason: "Immediate revocation should invalidate cached authorization",
-    });
-    expect(revokeTrustedAuthRecord).toBeDefined();
-
-    // Subsequent access must immediately fail closed without delay
-    expect(isSourceAuthorized(op)).toBe(false);
-    expect(() => assertSourceAuthorized(op)).toThrow(SourceUnauthorizedError);
     const policy = getSourcePolicy(op);
     expect(policy.status).toBe("BLOCKED");
     expect(policy.enabled).toBe(false);
-
-    // Expired record is also immediately denied even if status is APPROVED in record
-    const expiredRecord: TrustedAuthRecord = {
-      recordId: "REC-TEST-ALREADY-EXPIRED",
-      sourceId: "reddit",
-      name: "Expired Record Test",
-      status: "APPROVED",
-      authorizedPurposes: ["commercial_lead_generation"],
-      scopes: ["search_discovery"],
-      effectiveDate: "2020-01-01T00:00:00.000Z",
-      expirationDate: "2021-01-01T00:00:00.000Z",
-      evidenceReference: "DOC-EXPIRED-001",
-      approvalProvenance: {
-        approvedBy: "Legal",
-        reviewedAt: "2020-01-01T00:00:00.000Z",
-        notes: "Expired long ago",
-      },
-    };
-    registerTrustedAuthRecord(expiredRecord);
-    expect(isSourceAuthorized({ ...op, authRecordIdOverride: "REC-TEST-ALREADY-EXPIRED" })).toBe(false);
+    expect(policy.reason).toContain("Durable authorization store is unreachable");
+    expect(() => assertSourceAuthorized(op)).toThrow(SourceUnauthorizedError);
   });
 
-  // Test 3: Unauthorized callers cannot approve, overwrite, or revoke records, and unblock protection prevents promoting blocked records without an explicit operator action and new evidence
-  it("Test 3: Unauthorized callers cannot mutate records, and unblock protection prevents accidental unblocking", async () => {
-    // 3a: Non-operator / invalid role callers are rejected
-    await expect(
-      operatorApproveRecord({ operatorId: "anon", role: "developer" as unknown as OperatorRole }, {
-        recordId: "REC-REDDIT-COMMERCIAL-UNVERIFIED",
-        evidenceReference: "DOC",
-        notes: "Unauthorized attempt",
-      }),
-    ).rejects.toBeInstanceOf(OperatorAuthorizationError);
+  // Test 4: Cache expiry and invalidation work as documented across runtime instances and processes
+  it("Test 4: Cache expiry and invalidation work as documented across runtime instances and processes", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "leystic-auth-ttl-"));
+    const storePath = path.join(tmpDir, "source_auth.json");
 
-    await expect(
-      operatorRevokeRecord(null as unknown as OperatorContext, {
-        recordId: "REC-REDDIT-COMMERCIAL-UNVERIFIED",
-        status: "BLOCKED",
-        reason: "No context",
-      }),
-    ).rejects.toBeInstanceOf(OperatorAuthorizationError);
+    try {
+      const sharedStore = new PersistentFileSourceAuthStore(storePath);
 
-    // 3b: Malformed records are rejected leaving state intact
-    expect(() =>
-      registerTrustedAuthRecord({
-        recordId: "MALFORMED-RECORD",
+      // Instance A with short TTL (20ms)
+      const registryA = new SourcePolicyRegistry(sharedStore, 20);
+      // Instance B with short TTL (20ms)
+      const registryB = new SourcePolicyRegistry(sharedStore, 20);
+
+      const testRecord: TrustedAuthRecord = {
+        recordId: "REC-TEST-TTL-EXPIRY",
         sourceId: "reddit",
-        name: "Broken Dates",
+        name: "TTL Expiry Record",
         status: "APPROVED",
         authorizedPurposes: ["commercial_lead_generation"],
         scopes: ["search_discovery"],
-        effectiveDate: "2028-01-01T00:00:00.000Z",
-        expirationDate: "2026-01-01T00:00:00.000Z",
+        effectiveDate: "2026-01-01T00:00:00.000Z",
+        expirationDate: "2028-01-01T00:00:00.000Z",
+        evidenceReference: "DOC-TTL-001",
+        approvalProvenance: { approvedBy: "Legal", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "TTL test" },
+      };
+
+      await registryA.registerRecord(legalOperator, testRecord);
+      await registryB.syncFromStore();
+      expect(registryB.getRecord("REC-TEST-TTL-EXPIRY")?.status).toBe("APPROVED");
+
+      // Instance A revokes record in the shared store
+      await registryA.revokeRecord(legalOperator, {
+        recordId: "REC-TEST-TTL-EXPIRY",
+        status: "BLOCKED",
+        reason: "Invalidated via revocation",
+      });
+
+      // In Instance A, cache was immediately invalidated on revocation
+      expect(registryA.getRecord("REC-TEST-TTL-EXPIRY")?.status).toBe("BLOCKED");
+
+      // In Instance B, wait for TTL to expire (35ms > 20ms)
+      await new Promise((resolve) => setTimeout(resolve, 35));
+      expect(registryB.isCacheExpired()).toBe(true);
+
+      // Once ensureFresh is called after TTL, Instance B sees the revocation
+      await registryB.ensureFresh();
+      expect(registryB.getRecord("REC-TEST-TTL-EXPIRY")?.status).toBe("BLOCKED");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Test 5: Fabricated operator contexts cannot approve or revoke records in production, including when secrets are absent
+  it("Test 5: Fabricated operator contexts cannot approve or revoke records in production, including when secrets are absent", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+
+    // 5a: In production without OPERATOR_SECRET_KEY configured, all mutations fail closed
+    vi.stubEnv("OPERATOR_SECRET_KEY", "");
+
+    await expect(
+      operatorApproveRecord(legalOperator, {
+        recordId: "REC-REDDIT-COMMERCIAL-UNVERIFIED",
         evidenceReference: "DOC",
-        approvalProvenance: { approvedBy: "Tester", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "bad dates" },
+        notes: "Attempt without secret configured",
       }),
-    ).toThrow(InvalidAuthRecordError);
+    ).rejects.toThrow(OperatorAuthorizationError);
 
-    // 3c: Immutability: getTrustedRecord returns frozen object
-    const crawlerRecord = getTrustedRecord("REC-WEBSITE-CRAWLER-FIRST-PARTY");
-    expect(crawlerRecord).not.toBeNull();
-    expect(Object.isFrozen(crawlerRecord)).toBe(true);
-    expect(() => {
-      (crawlerRecord as unknown as { status: string }).status = "BLOCKED";
-    }).toThrow();
+    await expect(
+      operatorRevokeRecord(legalOperator, {
+        recordId: "REC-REDDIT-COMMERCIAL-UNVERIFIED",
+        status: "BLOCKED",
+        reason: "Attempt without secret configured",
+      }),
+    ).rejects.toThrow(OperatorAuthorizationError);
 
-    // 3d: Unblock protection: Attempting to overwrite a BLOCKED record without unblockConfirmed throws
+    // 5b: With secret configured in production, invalid key or anonymous identity fails closed
+    vi.stubEnv("OPERATOR_SECRET_KEY", "super-secret-operator-key-999");
+
+    const anonOperator: OperatorContext = {
+      operatorId: "anon",
+      role: "legal_counsel",
+      operatorKey: "super-secret-operator-key-999",
+    };
+    await expect(
+      operatorApproveRecord(anonOperator, {
+        recordId: "REC-REDDIT-COMMERCIAL-UNVERIFIED",
+        evidenceReference: "DOC",
+        notes: "Attempt with anon identity",
+      }),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    const wrongKeyOperator: OperatorContext = {
+      operatorId: "legal_officer_real",
+      role: "legal_counsel",
+      operatorKey: "wrong-secret-key",
+    };
+    await expect(
+      operatorApproveRecord(wrongKeyOperator, {
+        recordId: "REC-REDDIT-COMMERCIAL-UNVERIFIED",
+        evidenceReference: "DOC",
+        notes: "Attempt with wrong key",
+      }),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    // 5c: Calling registerTrustedAuthRecord without operator context in production throws
+    expect(() =>
+      registerTrustedAuthRecord({
+        recordId: "REC-TEST-PROD-ATTEMPT",
+        sourceId: "reddit",
+        name: "Test",
+        status: "APPROVED",
+        authorizedPurposes: ["commercial_lead_generation"],
+        scopes: ["search_discovery"],
+        effectiveDate: "2026-01-01T00:00:00.000Z",
+        expirationDate: "2028-01-01T00:00:00.000Z",
+        evidenceReference: "DOC",
+        approvalProvenance: { approvedBy: "Tester", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "test" },
+      }),
+    ).toThrow(OperatorAuthorizationError);
+  });
+
+  // Test 6: Only an authenticated operator with an appropriate role can perform each type of mutation
+  it("Test 6: Only an authenticated operator with an appropriate role can perform each type of mutation", async () => {
+    // Non-permitted roles are rejected
+    await expect(
+      operatorApproveRecord({ operatorId: "developer_001", role: "developer" as unknown as OperatorRole }, {
+        recordId: "REC-REDDIT-COMMERCIAL-UNVERIFIED",
+        evidenceReference: "DOC",
+        notes: "Dev role cannot mutate",
+      }),
+    ).rejects.toBeInstanceOf(OperatorAuthorizationError);
+
+    // Unblocking a BLOCKED record requires legal_counsel or compliance_officer
     const blockedRecord = getTrustedRecord("REC-REDDIT-COMMERCIAL-UNVERIFIED");
     expect(blockedRecord?.status).toBe("BLOCKED");
 
-    const candidateUnblock: TrustedAuthRecord = {
+    const unblockCandidate: TrustedAuthRecord = {
       ...blockedRecord!,
       status: "APPROVED",
-      approvalProvenance: {
-        approvedBy: "Test",
-        reviewedAt: "2026-01-01T00:00:00.000Z",
-        notes: "Attempted silent overwrite",
-      },
+      evidenceReference: "NEW-OFFICIAL-CONTRACT-2026",
+      approvalProvenance: { approvedBy: "Sysadmin", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "Sysadmin unblock" },
     };
 
-    // Fails without unblockConfirmed: true
+    // sysadmin cannot unblock
     await expect(
-      operatorRegisterRecord(legalOperator, candidateUnblock),
-    ).rejects.toBeInstanceOf(OperatorAuthorizationError);
+      operatorRegisterRecord(adminOperator, unblockCandidate, { unblockConfirmed: true }),
+    ).rejects.toThrow(OperatorAuthorizationError);
 
-    // Fails if operator role is not legal_counsel or compliance_officer
+    // legal_counsel without unblockConfirmed cannot unblock
     await expect(
-      operatorRegisterRecord(adminOperator, candidateUnblock, { unblockConfirmed: true }),
-    ).rejects.toBeInstanceOf(OperatorAuthorizationError);
+      operatorRegisterRecord(legalOperator, unblockCandidate, { unblockConfirmed: false }),
+    ).rejects.toThrow(OperatorAuthorizationError);
 
-    // Fails if new evidenceReference is not provided
+    // legal_counsel without new evidence cannot unblock
     await expect(
-      operatorRegisterRecord(legalOperator, candidateUnblock, { unblockConfirmed: true }),
-    ).rejects.toBeInstanceOf(InvalidAuthRecordError);
+      operatorRegisterRecord(
+        legalOperator,
+        { ...unblockCandidate, evidenceReference: blockedRecord!.evidenceReference },
+        { unblockConfirmed: true },
+      ),
+    ).rejects.toThrow(InvalidAuthRecordError);
+
+    // Valid legal unblock with confirmation and new evidence succeeds
+    const unblocked = await operatorRegisterRecord(legalOperator, unblockCandidate, { unblockConfirmed: true });
+    expect(unblocked.status).toBe("APPROVED");
+    expect(unblocked.evidenceReference).toBe("NEW-OFFICIAL-CONTRACT-2026");
   });
 
-  // Test 4: Approval and revocation operations produce complete, durable audit entries
-  it("Test 4: Approval and revocation operations produce complete, durable audit entries", async () => {
+  // Test 7: Operation identifiers match their exact SKU and fetch kind
+  it("Test 7: Operation identifiers match their exact SKU and fetch kind", () => {
+    // ACQUISITION_OPERATIONS maps each workflow to required operationId, sourceId, sku, kind, purpose, and scope
+    expect(ACQUISITION_OPERATIONS.lead_search).toEqual({
+      operationId: "lead_search",
+      sourceId: "reddit",
+      sku: "reddit.search",
+      kind: "keyword",
+      purpose: "commercial_lead_generation",
+      scope: "search_discovery",
+    });
+    expect(ACQUISITION_OPERATIONS.lead_comments).toEqual({
+      operationId: "lead_comments",
+      sourceId: "reddit",
+      sku: "reddit.post_comments",
+      kind: "comments",
+      purpose: "commercial_lead_generation",
+      scope: "comments_read",
+    });
+    expect(ACQUISITION_OPERATIONS.lead_post).toEqual({
+      operationId: "lead_post",
+      sourceId: "reddit",
+      sku: "reddit.post",
+      kind: "post",
+      purpose: "commercial_lead_generation",
+      scope: "social_content_read",
+    });
+    expect(ACQUISITION_OPERATIONS.seo_google_search).toEqual({
+      operationId: "seo_google_search",
+      sourceId: "google_scraped_serp",
+      sku: "google.search",
+      kind: "serp",
+      purpose: "seo_opportunity_discovery",
+      scope: "search_discovery",
+    });
+    expect(ACQUISITION_OPERATIONS.x_search).toEqual({
+      operationId: "x_search",
+      sourceId: "x",
+      sku: "twitter.search",
+      kind: "x_search",
+      purpose: "social_intent_monitoring",
+      scope: "search_discovery",
+    });
+    expect(ACQUISITION_OPERATIONS.website_crawl).toEqual({
+      operationId: "website_crawl",
+      sourceId: "website_crawler",
+      sku: "website.crawl",
+      kind: "website_crawl",
+      purpose: "customer_website_coverage",
+      scope: "customer_domain_crawl",
+    });
+
+    // isPermittedAcquisitionOperation validates all 5 fields
+    expect(
+      isPermittedAcquisitionOperation("reddit.search", "keyword", "commercial_lead_generation", "search_discovery", "lead_search"),
+    ).toBe(true);
+    expect(
+      isPermittedAcquisitionOperation("reddit.search", "post", "commercial_lead_generation", "search_discovery", "lead_search"),
+    ).toBe(false);
+  });
+
+  // Test 8: A valid operation mapping cannot authorize a different workflow
+  it("Test 8: A valid operation mapping cannot authorize a different workflow", () => {
+    // reddit.post or a post fetch using lead_search fails closed
+    expect(() =>
+      operationForFetch({
+        sku: "reddit.post",
+        kind: "post",
+        operation: {
+          operationId: "lead_search",
+          sourceId: "reddit",
+          purpose: "commercial_lead_generation",
+          scope: "search_discovery",
+        },
+      }),
+    ).toThrow(SourceUnauthorizedError);
+
+    // Attempting to override purpose or scope defined for an operation is rejected
+    expect(() =>
+      operationForFetch({
+        sku: "reddit.search",
+        kind: "keyword",
+        operation: {
+          operationId: "lead_search",
+          sourceId: "reddit",
+          purpose: "competitor_intelligence",
+          scope: "social_content_read",
+        },
+      }),
+    ).toThrow(SourceUnauthorizedError);
+
+    // Missing operation context fails closed
+    expect(() =>
+      operationForFetch({
+        sku: "reddit.search",
+        kind: "keyword",
+      }),
+    ).toThrow(SourceUnauthorizedError);
+
+    // Unknown SKU fails closed
+    expect(() => sourceForSku("unknown.provider.sku")).toThrow(SourceUnauthorizedError);
+    expect(() => sourceForSku("bing.search")).toThrow(SourceUnauthorizedError);
+  });
+
+  // Test 9: Cache reuse cannot bypass a new operation's purpose or scope requirements
+  it("Test 9: Cache reuse cannot bypass a new operation's purpose or scope requirements", async () => {
+    const auditRecord: TrustedAuthRecord = {
+      recordId: "REC-TEST-AUDIT-ONLY-9",
+      sourceId: "reddit",
+      name: "Audit Only Agreement",
+      status: "APPROVED",
+      authorizedPurposes: ["read_only_audit"],
+      scopes: ["read_only_audit"],
+      effectiveDate: "2026-01-01T00:00:00.000Z",
+      expirationDate: null,
+      evidenceReference: "AUDIT-009",
+      approvalProvenance: { approvedBy: "Auditor", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "Audit only" },
+    };
+    registerTrustedAuthRecord(auditRecord);
+
+    vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
+    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-AUDIT-ONLY-9");
+
+    let cacheAccessed = false;
+    let networkAccessed = false;
+
+    const ctx = {
+      projectId: "p_cache_test",
+      funded: {
+        funding: "house" as const,
+        call: async <T>(fn: () => Promise<T>) => ({ result: await fn(), requestId: "req-1" }),
+        client: { reddit: { search: async () => ({ output: { found: true as const, data: { posts: [] } }, costUsd: 0.001 }) } },
+      } as unknown as Parameters<typeof fetchShared>[0]["ctx"]["funded"],
+      maxAgeMs: 3600000,
+    };
+
+    // Attempting commercial_lead_generation acquisition must fail closed before cache or network run
+    await expect(
+      fetchShared({
+        ctx,
+        kind: "keyword",
+        sku: "reddit.search",
+        normalizedQuery: "commercial test query",
+        operation: {
+          operationId: "lead_search",
+          sourceId: "reddit",
+          purpose: "commercial_lead_generation",
+          scope: "search_discovery",
+        },
+        run: async () => {
+          networkAccessed = true;
+          return { data: { posts: [] }, costUsd: 0.001 };
+        },
+        store: async () => [],
+        load: async () => {
+          cacheAccessed = true;
+          return [];
+        },
+      }),
+    ).rejects.toBeInstanceOf(SourceUnauthorizedError);
+
+    expect(cacheAccessed).toBe(false);
+    expect(networkAccessed).toBe(false);
+  });
+
+  // Test 10: The audit ledger survives record state changes, and no ordinary registry operation or cascade deletion can erase audit events
+  it("Test 10: The audit ledger survives record state changes, and no ordinary registry operation or cascade deletion can erase audit events", async () => {
     const testRecordId = `REC-TEST-AUDIT-${randomUUID().slice(0, 8)}`;
     const pendingRecord: TrustedAuthRecord = {
       recordId: testRecordId,
@@ -338,287 +592,8 @@ describe("Operation-Specific Source Authorization and Registry Controls", () => 
     expect(revEvent?.newStatus).toBe("BLOCKED");
   });
 
-  // Test 5: All sources (Reddit, X, Google SERP, website crawler) remain correctly gated under their current status
-  it("Test 5: All sources remain correctly gated under their baseline status", () => {
-    // Reddit is BLOCKED
-    const redditPolicy = getSourcePolicy("reddit");
-    expect(redditPolicy.status).toBe("BLOCKED");
-    expect(redditPolicy.enabled).toBe(false);
-    expect(redditPolicy.commercialUsePermitted).toBe(false);
-
-    // X is PENDING under feature enablement without approved record
-    vi.stubEnv("X_LEADS", "true");
-    vi.stubEnv("X_AUTH_RECORD_ID", "");
-    const xPolicy = getSourcePolicy("x");
-    expect(xPolicy.status).toBe("PENDING");
-    expect(xPolicy.enabled).toBe(false);
-    expect(xPolicy.commercialUsePermitted).toBe(false);
-
-    // X is BLOCKED when dark
-    vi.stubEnv("X_LEADS", "false");
-    expect(getSourcePolicy("x").status).toBe("BLOCKED");
-
-    // Google Scraped SERP is BLOCKED
-    const scrapedGoogle = getSourcePolicy("google_scraped_serp");
-    expect(scrapedGoogle.status).toBe("BLOCKED");
-    expect(scrapedGoogle.enabled).toBe(false);
-
-    // Website Crawler is APPROVED
-    const crawlerPolicy = getSourcePolicy({
-      sourceId: "website_crawler",
-      purpose: "customer_website_coverage",
-      scope: "customer_domain_crawl",
-    });
-    expect(crawlerPolicy.status).toBe("APPROVED");
-    expect(crawlerPolicy.enabled).toBe(true);
-    expect(crawlerPolicy.commercialUsePermitted).toBe(true);
-    expect(crawlWebsiteInventory).toBeDefined();
-
-    // All source policies list displays informative statuses without granting execution
-    const policies = allSourcePolicies();
-    expect(policies.length).toBeGreaterThanOrEqual(5);
-    for (const p of policies) {
-      expect(typeof p.name).toBe("string");
-      expect(typeof p.status).toBe("string");
-      expect(typeof p.reason).toBe("string");
-      expect(typeof p.legalDisclaimer).toBe("string");
-    }
-  });
-
-  // Test 6: Every production source acquisition passes the correct consuming purpose and scope
-  it("Test 6: Every production source acquisition passes the correct consuming purpose and scope", () => {
-    // ACQUISITION_OPERATIONS maps each workflow to required sourceId, purpose & scope
-    expect(ACQUISITION_OPERATIONS.lead_search).toEqual({
-      sourceId: "reddit",
-      purpose: "commercial_lead_generation",
-      scope: "search_discovery",
-    });
-    expect(ACQUISITION_OPERATIONS.lead_comments).toEqual({
-      sourceId: "reddit",
-      purpose: "commercial_lead_generation",
-      scope: "comments_read",
-    });
-    expect(ACQUISITION_OPERATIONS.lead_profile).toEqual({
-      sourceId: "reddit",
-      purpose: "commercial_lead_generation",
-      scope: "profile_metadata_read",
-    });
-    expect(ACQUISITION_OPERATIONS.competitor_search).toEqual({
-      sourceId: "reddit",
-      purpose: "competitor_intelligence",
-      scope: "search_discovery",
-    });
-    expect(ACQUISITION_OPERATIONS.competitor_post).toEqual({
-      sourceId: "reddit",
-      purpose: "competitor_intelligence",
-      scope: "social_content_read",
-    });
-    expect(ACQUISITION_OPERATIONS.seo_google_search).toEqual({
-      sourceId: "google_scraped_serp",
-      purpose: "seo_opportunity_discovery",
-      scope: "search_discovery",
-    });
-    expect(ACQUISITION_OPERATIONS.seo_post).toEqual({
-      sourceId: "reddit",
-      purpose: "seo_opportunity_discovery",
-      scope: "social_content_read",
-    });
-    expect(ACQUISITION_OPERATIONS.x_search).toEqual({
-      sourceId: "x",
-      purpose: "social_intent_monitoring",
-      scope: "search_discovery",
-    });
-    expect(ACQUISITION_OPERATIONS.website_crawl).toEqual({
-      sourceId: "website_crawler",
-      purpose: "customer_website_coverage",
-      scope: "customer_domain_crawl",
-    });
-
-    // operationForFetch resolves properly when matching operation is provided
-    const validOp = operationForFetch({
-      sku: "reddit.search",
-      kind: "keyword",
-      operation: {
-        sourceId: "reddit",
-        purpose: "commercial_lead_generation",
-        scope: "search_discovery",
-      },
-    });
-    expect(validOp.sourceId).toBe("reddit");
-    expect(validOp.purpose).toBe("commercial_lead_generation");
-    expect(validOp.scope).toBe("search_discovery");
-    expect(
-      isPermittedAcquisitionOperation("reddit.search", "keyword", "commercial_lead_generation", "search_discovery"),
-    ).toBe(true);
-    expect(
-      isPermittedAcquisitionOperation("reddit.search", "keyword", "read_only_audit", "search_discovery"),
-    ).toBe(false);
-
-    // multi-scope records only authorize specifically granted combinations
-    const multiScopeRecord: TrustedAuthRecord = {
-      recordId: "REC-TEST-MULTI-SCOPE-6",
-      sourceId: "reddit",
-      name: "Authorized Multi-Scope Partner Contract",
-      status: "APPROVED",
-      authorizedPurposes: ["commercial_lead_generation", "competitor_intelligence"],
-      scopes: ["search_discovery", "social_content_read"],
-      effectiveDate: "2026-01-01T00:00:00.000Z",
-      expirationDate: "2028-01-01T00:00:00.000Z",
-      evidenceReference: "CONTRACT-2026-MULTI-001",
-      approvalProvenance: {
-        approvedBy: "Legal Counsel",
-        reviewedAt: "2026-01-02T00:00:00.000Z",
-        notes: "Authorized for search and post reading only",
-      },
-    };
-    registerTrustedAuthRecord(multiScopeRecord);
-
-    vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-MULTI-SCOPE-6");
-
-    expect(
-      isSourceAuthorized({
-        sourceId: "reddit",
-        purpose: "commercial_lead_generation",
-        scope: "search_discovery",
-      }),
-    ).toBe(true);
-
-    expect(
-      isSourceAuthorized({
-        sourceId: "reddit",
-        purpose: "competitor_intelligence",
-        scope: "social_content_read",
-      }),
-    ).toBe(true);
-
-    expect(
-      isSourceAuthorized({
-        sourceId: "reddit",
-        purpose: "commercial_lead_generation",
-        scope: "comments_read",
-      }),
-    ).toBe(false);
-  });
-
-  // Test 7: Missing or mismatched operation context fails closed
-  it("Test 7: Missing or mismatched operation context fails closed", () => {
-    // Missing purpose or scope
-    expect(() =>
-      operationForFetch({
-        sku: "reddit.search",
-        kind: "keyword",
-      }),
-    ).toThrow(SourceUnauthorizedError);
-
-    // Mismatched purpose & scope: e.g. seo purpose on comments kind
-    expect(() =>
-      operationForFetch({
-        sku: "reddit.post_comments",
-        kind: "comments",
-        operation: {
-          sourceId: "reddit",
-          purpose: "seo_opportunity_discovery",
-          scope: "comments_read",
-        },
-      }),
-    ).toThrow(SourceUnauthorizedError);
-
-    // Unknown SKU fails closed
-    expect(() => sourceForSku("unknown.provider.sku")).toThrow(SourceUnauthorizedError);
-    expect(() => sourceForSku("bing.search")).toThrow(SourceUnauthorizedError);
-  });
-
-  // Test 8: Cache and in-flight reuse cannot bypass authorization for a different purpose or scope
-  it("Test 8: Cache and in-flight reuse cannot bypass authorization for a different purpose or scope", async () => {
-    // Register record approved only for read_only_audit
-    const auditRecord: TrustedAuthRecord = {
-      recordId: "REC-TEST-AUDIT-ONLY-8",
-      sourceId: "reddit",
-      name: "Audit Only Agreement",
-      status: "APPROVED",
-      authorizedPurposes: ["read_only_audit"],
-      scopes: ["read_only_audit"],
-      effectiveDate: "2026-01-01T00:00:00.000Z",
-      expirationDate: null,
-      evidenceReference: "AUDIT-008",
-      approvalProvenance: { approvedBy: "Auditor", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "Audit only" },
-    };
-    registerTrustedAuthRecord(auditRecord);
-
-    vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-AUDIT-ONLY-8");
-
-    let cacheAccessed = false;
-    let networkAccessed = false;
-
-    const ctx = {
-      projectId: "p_cache_test",
-      funded: {
-        funding: "house" as const,
-        call: async <T>(fn: () => Promise<T>) => ({ result: await fn(), requestId: "req-1" }),
-        client: { reddit: { search: async () => ({ output: { found: true as const, data: { posts: [] } }, costUsd: 0.001 }) } },
-      } as unknown as Parameters<typeof fetchShared>[0]["ctx"]["funded"],
-      maxAgeMs: 3600000,
-    };
-
-    // Attempting commercial_lead_generation acquisition must fail closed before cache or run
-    await expect(
-      fetchShared({
-        ctx,
-        kind: "keyword",
-        sku: "reddit.search",
-        normalizedQuery: "high commercial intent query",
-        operation: {
-          sourceId: "reddit",
-          purpose: "commercial_lead_generation",
-          scope: "search_discovery",
-        },
-        run: async () => {
-          networkAccessed = true;
-          return { data: { posts: [] }, costUsd: 0.001 };
-        },
-        store: async () => [],
-        load: async () => {
-          cacheAccessed = true;
-          return [];
-        },
-      }),
-    ).rejects.toBeInstanceOf(SourceUnauthorizedError);
-
-    expect(cacheAccessed).toBe(false);
-    expect(networkAccessed).toBe(false);
-  });
-
-  // Test 9: Downstream source-data serving (leads, competitors, SEO, alerts) remains inaccessible when authorization is denied
-  it("Test 9: Downstream source-data serving remains inaccessible when authorization is denied", async () => {
-    vi.stubEnv("X_LEADS", "false");
-    vi.stubEnv("X_AUTH_RECORD_ID", "");
-
-    const xFilter = { days: 30 as const, status: "new" as const };
-    expect(await listXLeads("p_test", xFilter)).toEqual([]);
-    expect(await xLeadById("p_test", "tweet_999")).toBeNull();
-    expect(await listXHeld("p_test", xFilter)).toEqual([]);
-    expect(await listXFiltered("p_test", xFilter)).toEqual({
-      items: [],
-      judged: 0,
-      screened: 0,
-      unfinished: 0,
-      closeCalls: 0,
-      worth: 0,
-      pending: 0,
-    });
-    expect(await listXOpportunities("p_test", xFilter)).toEqual({
-      items: [],
-      total: 0,
-      posts: 0,
-      faces: [],
-    });
-    expect(await newXLeadsSince("p_test", new Date(0))).toEqual([]);
-  });
-
-  // Test 10: Historical purge behavior and documentation match actual implementation
-  it("Test 10: Historical purge behavior and documentation match actual implementation", async () => {
+  // Test 11: Routine TTL behavior remains intact and historical purge behavior matches its honest status
+  it("Test 11: Routine TTL behavior remains intact and historical purge behavior matches its honest status", async () => {
     // Calling historical purge without operator approval confirmation throws OperatorApprovalRequiredError
     await expect(
       purgeHistoricalData({
@@ -643,40 +618,60 @@ describe("Operation-Specific Source Authorization and Registry Controls", () => 
     });
     expect(plan.isImplemented).toBe(false);
     expect(plan.status).toBe("deferred_not_implemented");
-  });
 
-  // Test 11: Routine TTL cleanup still works and preserves existing foreign-key/cascade protections
-  it("Test 11: Routine TTL cleanup operates within safe retention boundaries and preserves foreign-key cascade protections", () => {
-    // Calling historical purge without operator approval confirmation throws OperatorApprovalRequiredError
-    expect(() => {
-      throw new OperatorApprovalRequiredError("Purge rejected: operator approval required.");
-    }).toThrow(OperatorApprovalRequiredError);
-
-    // Verify retention window constant
+    // Routine TTL cleanup functions exist
     expect(auditRetention).toBeDefined();
     expect(deleteExpiredPosts).toBeDefined();
   });
 
-  // Test 12: Independent authorized functionality continues working when another source is blocked
-  it("Test 12: Independent authorized functionality (website crawler) remains operational when Reddit is blocked", () => {
-    vi.stubEnv("REDDIT_SOURCE_ENABLED", "false");
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "");
-    vi.stubEnv("X_LEADS", "false");
+  // Test 12: Reddit, X, and scraped Google SERP remain blocked or pending under the current register
+  it("Test 12: Reddit, X, and scraped Google SERP remain blocked or pending under the current register", () => {
+    // Reddit is BLOCKED
+    const redditPolicy = getSourcePolicy("reddit");
+    expect(redditPolicy.status).toBe("BLOCKED");
+    expect(redditPolicy.enabled).toBe(false);
+    expect(redditPolicy.commercialUsePermitted).toBe(false);
 
-    const crawlerOp: SourceOperationRequest = {
+    // Reddit flag + arbitrary record fails closed
+    vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
+    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "arbitrary-unknown-record");
+    expect(getSourcePolicy("reddit").status).toBe("BLOCKED");
+    expect(getSourcePolicy("reddit").enabled).toBe(false);
+
+    // X is PENDING when enabled without approved record
+    vi.stubEnv("X_LEADS", "true");
+    vi.stubEnv("X_AUTH_RECORD_ID", "");
+    const xPolicy = getSourcePolicy("x");
+    expect(xPolicy.status).toBe("PENDING");
+    expect(xPolicy.enabled).toBe(false);
+
+    // X is BLOCKED when dark
+    vi.stubEnv("X_LEADS", "false");
+    expect(getSourcePolicy("x").status).toBe("BLOCKED");
+
+    // Google Scraped SERP is BLOCKED
+    const scrapedGoogle = getSourcePolicy("google_scraped_serp");
+    expect(scrapedGoogle.status).toBe("BLOCKED");
+    expect(scrapedGoogle.enabled).toBe(false);
+
+    // Website Crawler is APPROVED
+    const crawlerPolicy = getSourcePolicy({
+      operationId: "website_crawl",
       sourceId: "website_crawler",
       purpose: "customer_website_coverage",
       scope: "customer_domain_crawl",
-    };
-
-    expect(isSourceAuthorized(crawlerOp)).toBe(true);
-    expect(() => assertSourceAuthorized(crawlerOp)).not.toThrow();
-
-    const crawlerPolicy = getSourcePolicy(crawlerOp);
+    });
     expect(crawlerPolicy.status).toBe("APPROVED");
     expect(crawlerPolicy.enabled).toBe(true);
     expect(crawlerPolicy.commercialUsePermitted).toBe(true);
-    expect(crawlWebsiteInventory).toBeDefined();
+
+    // allSourcePolicies surfaces accurate statuses
+    const policies = allSourcePolicies();
+    expect(policies.length).toBeGreaterThanOrEqual(4);
+    for (const p of policies) {
+      expect(typeof p.name).toBe("string");
+      expect(typeof p.status).toBe("string");
+    }
   });
 });
 

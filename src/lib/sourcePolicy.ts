@@ -92,7 +92,24 @@ export type SourceAuthAuditEvent = {
   createdAt: string; // ISO 8601
 };
 
+export type SourceOperationId =
+  | "lead_search"
+  | "lead_subreddit_posts"
+  | "lead_post"
+  | "lead_comments"
+  | "lead_profile"
+  | "lead_subreddit_details"
+  | "competitor_search"
+  | "competitor_post"
+  | "seo_google_search"
+  | "seo_post"
+  | "x_search"
+  | "x_tweet"
+  | "x_profile"
+  | "website_crawl";
+
 export type SourceOperationRequest = {
+  operationId?: SourceOperationId;
   sourceId: SourceId;
   purpose: SourceUsagePurpose;
   scope: SourceUsageScope;
@@ -283,135 +300,187 @@ export const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
 
 export const ACQUISITION_OPERATIONS = {
   lead_search: {
+    operationId: "lead_search" as const,
     sourceId: "reddit" as const,
+    sku: "reddit.search",
+    kind: "keyword",
     purpose: "commercial_lead_generation" as const,
     scope: "search_discovery" as const,
   },
   lead_subreddit_posts: {
+    operationId: "lead_subreddit_posts" as const,
     sourceId: "reddit" as const,
+    sku: "reddit.subreddit_posts",
+    kind: "subreddit_posts",
     purpose: "commercial_lead_generation" as const,
     scope: "search_discovery" as const,
   },
   lead_post: {
+    operationId: "lead_post" as const,
     sourceId: "reddit" as const,
+    sku: "reddit.post",
+    kind: "post",
     purpose: "commercial_lead_generation" as const,
     scope: "social_content_read" as const,
   },
   lead_comments: {
+    operationId: "lead_comments" as const,
     sourceId: "reddit" as const,
+    sku: "reddit.post_comments",
+    kind: "comments",
     purpose: "commercial_lead_generation" as const,
     scope: "comments_read" as const,
   },
   lead_profile: {
+    operationId: "lead_profile" as const,
     sourceId: "reddit" as const,
+    sku: "reddit.avatar",
+    kind: "profile",
     purpose: "commercial_lead_generation" as const,
     scope: "profile_metadata_read" as const,
   },
   lead_subreddit_details: {
+    operationId: "lead_subreddit_details" as const,
     sourceId: "reddit" as const,
+    sku: "reddit.subreddit_details",
+    kind: "subreddit",
     purpose: "commercial_lead_generation" as const,
     scope: "search_discovery" as const,
   },
   competitor_search: {
+    operationId: "competitor_search" as const,
     sourceId: "reddit" as const,
+    sku: "reddit.search",
+    kind: "keyword",
     purpose: "competitor_intelligence" as const,
     scope: "search_discovery" as const,
   },
   competitor_post: {
+    operationId: "competitor_post" as const,
     sourceId: "reddit" as const,
+    sku: "reddit.post",
+    kind: "post",
     purpose: "competitor_intelligence" as const,
     scope: "social_content_read" as const,
   },
   seo_google_search: {
+    operationId: "seo_google_search" as const,
     sourceId: "google_scraped_serp" as const,
+    sku: "google.search",
+    kind: "serp",
     purpose: "seo_opportunity_discovery" as const,
     scope: "search_discovery" as const,
   },
   seo_post: {
+    operationId: "seo_post" as const,
     sourceId: "reddit" as const,
+    sku: "reddit.post",
+    kind: "post",
     purpose: "seo_opportunity_discovery" as const,
     scope: "social_content_read" as const,
   },
   x_search: {
+    operationId: "x_search" as const,
     sourceId: "x" as const,
+    sku: "twitter.search",
+    kind: "x_search",
     purpose: "social_intent_monitoring" as const,
     scope: "search_discovery" as const,
   },
   x_tweet: {
+    operationId: "x_tweet" as const,
     sourceId: "x" as const,
+    sku: "twitter.tweet",
+    kind: "x_tweet",
     purpose: "social_intent_monitoring" as const,
     scope: "social_content_read" as const,
   },
   x_profile: {
+    operationId: "x_profile" as const,
     sourceId: "x" as const,
+    sku: "twitter.profile",
+    kind: "x_profile",
     purpose: "social_intent_monitoring" as const,
     scope: "profile_metadata_read" as const,
   },
   website_crawl: {
+    operationId: "website_crawl" as const,
     sourceId: "website_crawler" as const,
+    sku: "website.crawl",
+    kind: "website_crawl",
     purpose: "customer_website_coverage" as const,
     scope: "customer_domain_crawl" as const,
   },
 } as const;
 
 export const REDDIT_LEADS_READ_OP: SourceOperationRequest = {
+  operationId: "lead_post",
   sourceId: "reddit",
   purpose: "commercial_lead_generation",
   scope: "social_content_read",
 };
 
 export const COMPETITOR_READ_OP: SourceOperationRequest = {
+  operationId: "competitor_post",
   sourceId: "reddit",
   purpose: "competitor_intelligence",
   scope: "social_content_read",
 };
 
 export const COMPETITOR_SCAN_OP: SourceOperationRequest = {
+  operationId: "competitor_search",
   sourceId: "reddit",
   purpose: "competitor_intelligence",
   scope: "search_discovery",
 };
 
 export const SEO_READ_OP: SourceOperationRequest = {
+  operationId: "seo_post",
   sourceId: "reddit",
   purpose: "seo_opportunity_discovery",
   scope: "social_content_read",
 };
 
 export const REDDIT_ALERT_OP: SourceOperationRequest = {
+  operationId: "lead_post",
   sourceId: "reddit",
   purpose: "commercial_lead_generation",
   scope: "social_content_read",
 };
 
 export const X_ALERT_OP: SourceOperationRequest = {
+  operationId: "x_tweet",
   sourceId: "x",
   purpose: "social_intent_monitoring",
   scope: "social_content_read",
 };
 
 export const REDDIT_API_LEADS_OP: SourceOperationRequest = {
+  operationId: "lead_post",
   sourceId: "reddit",
   purpose: "commercial_lead_generation",
   scope: "social_content_read",
 };
 
 export const REDDIT_API_SEO_OP: SourceOperationRequest = {
+  operationId: "seo_post",
   sourceId: "reddit",
   purpose: "seo_opportunity_discovery",
   scope: "social_content_read",
 };
 
 export const X_READ_OP: SourceOperationRequest = {
+  operationId: "x_tweet",
   sourceId: "x",
   purpose: "social_intent_monitoring",
   scope: "social_content_read",
 };
 
 export const X_SCAN_OP: SourceOperationRequest = {
+  operationId: "x_search",
   sourceId: "x",
   purpose: "social_intent_monitoring",
-  scope: "social_intent_monitoring",
+  scope: "search_discovery",
 };
 
 function cloneAndFreezeRecord(record: TrustedAuthRecord): TrustedAuthRecord {
@@ -573,9 +642,28 @@ export function assertAuthorizedOperator(context: unknown): asserts context is O
       `Invalid or unauthorized operator role '${String(c.role)}'. Permitted roles: [${validRoles.join(", ")}].`,
     );
   }
-  const expectedKey = process.env.OPERATOR_SECRET_KEY;
-  if (expectedKey && c.operatorKey !== expectedKey) {
-    throw new OperatorAuthorizationError("Invalid operator secret credentials provided.");
+
+  const isProduction = process.env.NODE_ENV === "production";
+  const configuredSecret = process.env.OPERATOR_SECRET_KEY;
+
+  if (isProduction) {
+    if (!configuredSecret || !configuredSecret.trim()) {
+      throw new OperatorAuthorizationError(
+        "Administrative mutations are disabled in production: OPERATOR_SECRET_KEY is not configured.",
+      );
+    }
+    if (typeof c.operatorKey !== "string" || c.operatorKey !== configuredSecret) {
+      throw new OperatorAuthorizationError("Invalid operator secret credentials provided.");
+    }
+    if (c.operatorId === "anon" || c.operatorId.toLowerCase().includes("unknown")) {
+      throw new OperatorAuthorizationError("Anonymous or unverified operator identity rejected in production.");
+    }
+  } else {
+    if (configuredSecret && configuredSecret.trim()) {
+      if (typeof c.operatorKey !== "string" || c.operatorKey !== configuredSecret) {
+        throw new OperatorAuthorizationError("Invalid operator secret credentials provided.");
+      }
+    }
   }
 }
 
@@ -588,20 +676,53 @@ export function isPermittedAcquisitionOperation(
   kind: string,
   purpose: SourceUsagePurpose,
   scope: SourceUsageScope,
+  operationId?: SourceOperationId,
 ): boolean {
-  void kind;
-  const expectedSource = sourceForSku(sku);
+  let expectedSource: SourceId;
+  try {
+    expectedSource = sourceForSku(sku);
+  } catch {
+    return false;
+  }
 
-  for (const op of Object.values(ACQUISITION_OPERATIONS)) {
-    if (op.sourceId === expectedSource && op.purpose === purpose && op.scope === scope) {
-      return true;
+  if (operationId) {
+    const def = ACQUISITION_OPERATIONS[operationId];
+    if (!def) {
+      return false;
     }
+    return (
+      def.operationId === operationId &&
+      def.sku === sku &&
+      def.kind === kind &&
+      def.purpose === purpose &&
+      def.scope === scope &&
+      def.sourceId === expectedSource
+    );
   }
 
-  if (purpose === "compliance_audit" && scope === "read_only_audit") {
-    return true;
-  }
-  return false;
+  return Object.values(ACQUISITION_OPERATIONS).some(
+    (def) =>
+      def.sku === sku &&
+      def.kind === kind &&
+      def.purpose === purpose &&
+      def.scope === scope &&
+      def.sourceId === expectedSource,
+  );
+}
+
+export function findAcquisitionOperation(
+  sku: string,
+  kind: string,
+  purpose: SourceUsagePurpose,
+  scope: SourceUsageScope,
+): (typeof ACQUISITION_OPERATIONS)[keyof typeof ACQUISITION_OPERATIONS] | undefined {
+  return Object.values(ACQUISITION_OPERATIONS).find(
+    (def) =>
+      def.sku === sku &&
+      def.kind === kind &&
+      def.purpose === purpose &&
+      def.scope === scope,
+  );
 }
 
 export interface SourceAuthStore {
@@ -997,11 +1118,15 @@ export class SourcePolicyRegistry {
   private lastSyncMs = 0;
   private readonly cacheTtlMs: number;
   private revision = 0;
+  private storeHealthy = true;
+  private isHydrated = false;
 
-  constructor(store: SourceAuthStore, cacheTtlMs = 1000) {
+  constructor(store: SourceAuthStore, cacheTtlMs = 60_000) {
     this.store = store;
     this.cacheTtlMs = cacheTtlMs;
-    this.seedCacheDefaults();
+    if (process.env.NODE_ENV !== "production") {
+      this.seedCacheDefaults();
+    }
   }
 
   seedCacheDefaults(): void {
@@ -1010,6 +1135,8 @@ export class SourcePolicyRegistry {
       const validated = validateTrustedAuthRecord(record);
       this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
     }
+    this.storeHealthy = true;
+    this.isHydrated = true;
     this.revision++;
   }
 
@@ -1021,34 +1148,66 @@ export class SourcePolicyRegistry {
     return this.revision;
   }
 
+  isHealthy(): boolean {
+    return this.storeHealthy;
+  }
+
   setStore(store: SourceAuthStore): void {
     this.store = store;
-    this.seedCacheDefaults();
+    this.storeHealthy = true;
+    this.isHydrated = false;
     this.lastSyncMs = 0;
+    this.cache.clear();
   }
 
   getRecord(recordId: string): TrustedAuthRecord | null {
+    if (!this.storeHealthy) {
+      return null;
+    }
     const found = this.cache.get(recordId.trim());
     return found ? cloneAndFreezeRecord(found) : null;
   }
 
   getAllRecords(): TrustedAuthRecord[] {
+    if (!this.storeHealthy) {
+      return [];
+    }
     return Array.from(this.cache.values()).map(cloneAndFreezeRecord);
   }
 
   async syncFromStore(): Promise<void> {
     try {
       const records = await this.store.getAllRecords();
-      if (records.length > 0) {
-        this.cache.clear();
-        for (const record of records) {
-          this.cache.set(record.recordId, cloneAndFreezeRecord(record));
-        }
+      this.cache.clear();
+      for (const record of records) {
+        const validated = validateTrustedAuthRecord(record);
+        this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
       }
       this.lastSyncMs = Date.now();
-    } catch {
-      // In offline/unreachable conditions, cache retains verified state
+      this.isHydrated = true;
+      this.storeHealthy = true;
+      this.revision++;
+    } catch (err) {
+      this.storeHealthy = false;
+      this.cache.clear();
+      throw new Error(
+        `Failed to synchronize source authorization registry from durable store: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
+  }
+
+  isCacheExpired(now = Date.now()): boolean {
+    if (!this.isHydrated || !this.storeHealthy) return true;
+    if (this.cacheTtlMs <= 0) return false;
+    return now - this.lastSyncMs >= this.cacheTtlMs;
+  }
+
+  async ensureFresh(force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && this.isHydrated && this.storeHealthy && !this.isCacheExpired(now)) {
+      return;
+    }
+    await this.syncFromStore();
   }
 
   async registerRecord(
@@ -1247,13 +1406,36 @@ export class SourcePolicyRegistry {
   }
 }
 
+/** Factory to select the authoritative storage backend. */
+export function createDefaultSourceAuthStore(): SourceAuthStore {
+  // In production, MUST use durable PostgreSQL store
+  if (process.env.NODE_ENV === "production") {
+    return new DrizzleSourceAuthStore();
+  }
+  // Persistent file store only where explicitly configured for tests or offline dev
+  if (process.env.SOURCE_AUTH_STORE === "drizzle") {
+    return new DrizzleSourceAuthStore();
+  }
+  return new PersistentFileSourceAuthStore();
+}
+
 // Global active store instance
-let globalStore: SourceAuthStore = new PersistentFileSourceAuthStore();
+let globalStore: SourceAuthStore = createDefaultSourceAuthStore();
 export const globalRegistry = new SourcePolicyRegistry(globalStore);
 
 export function setGlobalRegistryStore(store: SourceAuthStore): void {
   globalStore = store;
   globalRegistry.setStore(store);
+}
+
+/** Explicit runtime hydration hook called at server bootstrap. */
+export async function initSourcePolicyRegistry(): Promise<void> {
+  await globalRegistry.ensureFresh(true);
+}
+
+/** Explicit helper to ensure registry is freshly synced from durable store. */
+export async function ensureSourcePolicyFresh(force = false): Promise<void> {
+  await globalRegistry.ensureFresh(force);
 }
 
 /** Looks up a trusted record by its stable identifier. Returns an immutable frozen clone. */
@@ -1467,6 +1649,25 @@ export function getSourcePolicy(
   const authRecordIdOverride =
     (isOperationRequest ? target.authRecordIdOverride : options.authRecordIdOverride) ??
     options.authRecordIdOverride;
+
+  if (!globalRegistry.isHealthy()) {
+    return {
+      sourceId,
+      name: "Source Authorization Gate",
+      status: "BLOCKED",
+      enabled: false,
+      authRecordId: null,
+      commercialUsePermitted: false,
+      authorizedPurposes: [],
+      authorizedScopes: [],
+      requestedPurpose,
+      requestedScope,
+      reason:
+        "Durable authorization store is unreachable, failed validation, or is offline; access denied fail-closed.",
+      legalDisclaimer:
+        "Technical gate enforced: Access denied when durable authorization registry cannot be verified.",
+    };
+  }
 
   const cfg = config();
 

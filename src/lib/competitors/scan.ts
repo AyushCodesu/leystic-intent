@@ -13,11 +13,13 @@ import { capped, tierForUser } from "@/lib/tier";
 import { RETENTION_DAYS } from "@/lib/tiers";
 import {
   ACQUISITION_OPERATIONS,
+  ensureSourcePolicyFresh,
   isSourceAuthorized,
   type SourceOperationRequest,
 } from "@/lib/sourcePolicy";
 
 const COMPETITOR_SCAN_OP: SourceOperationRequest = {
+  operationId: "competitor_search",
   sourceId: "reddit",
   purpose: "competitor_intelligence",
   scope: "search_discovery",
@@ -164,6 +166,7 @@ export async function runCompetitorScan(
   const cadence = cadenceFor(settings.settings.cadence);
   // The tier decides how many competitors a project may watch.
   const names = capped(project.competitors, limits?.competitors);
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(COMPETITOR_SCAN_OP)) {
     await writeProgress(jobId, "Reddit source is unauthorized: competitor scan skipped");
     await enqueueJob("competitor_scan", projectId, cadence.nextRunAt(new Date()));

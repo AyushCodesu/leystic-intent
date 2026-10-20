@@ -1,8 +1,13 @@
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
+import {
+  ensureSourcePolicyFresh,
+  isSourceAuthorized,
+  type SourceOperationRequest,
+} from "@/lib/sourcePolicy";
 
 const X_READ_OP: SourceOperationRequest = {
+  operationId: "x_tweet",
   sourceId: "x",
   purpose: "social_intent_monitoring",
   scope: "social_content_read",
@@ -269,6 +274,7 @@ export async function listXLeads(
   /** Null for every one in the filter: History counts and dates them all before its own cap. */
   limit: number | null = 200,
 ): Promise<XLeadCard[]> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(X_READ_OP)) {
     return [];
   }
@@ -287,6 +293,7 @@ export async function listXLeads(
  * just marked replied, hidden or not a fit leaves the list but stays open.
  */
 export async function xLeadById(projectId: string, leadId: string, now = new Date()): Promise<XLeadCard | null> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(X_READ_OP)) {
     return null;
   }
@@ -298,6 +305,7 @@ export async function xLeadById(projectId: string, leadId: string, now = new Dat
 
 /** The pile held for a look: posts the judge could not settle, from the window. */
 export async function listXHeld(projectId: string, filter: XFeedFilter = { days: FEED_WINDOW_DAYS, status: "new" }): Promise<XHeldCard[]> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(X_READ_OP)) {
     return [];
   }
@@ -397,6 +405,7 @@ function filteredCard({ evaluation, post, author, closeCall, worth }: Evaluation
  * detail.
  */
 export async function listXFiltered(projectId: string, filter: XFeedFilter = { days: FEED_WINDOW_DAYS, status: "new" }): Promise<XFiltered> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(X_READ_OP)) {
     return { items: [], judged: 0, screened: 0, unfinished: 0, closeCalls: 0, worth: 0, pending: 0 };
   }
@@ -552,6 +561,7 @@ export async function listXOpportunities(
   now = new Date(),
   includeReplies = true,
 ): Promise<XOpportunityFeed> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(X_READ_OP)) {
     return { items: [], total: 0, posts: 0, faces: [] };
   }

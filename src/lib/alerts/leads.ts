@@ -12,15 +12,21 @@ import { LEAD_AUTHOR, LEAD_AUTHOR_JOIN, LEAD_BODY, LEAD_URL, NEED_AT, leadsBase 
 import { redditLeadNotMuted, xLeadNotMuted } from "@/lib/mutes";
 import { canonicalUrl, ownWords } from "@/lib/x/map";
 import { headlineOf } from "@/lib/x/read";
-import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
+import {
+  ensureSourcePolicyFresh,
+  isSourceAuthorized,
+  type SourceOperationRequest,
+} from "@/lib/sourcePolicy";
 
 const REDDIT_ALERT_OP: SourceOperationRequest = {
+  operationId: "lead_post",
   sourceId: "reddit",
   purpose: "commercial_lead_generation",
   scope: "social_content_read",
 };
 
 const X_ALERT_OP: SourceOperationRequest = {
+  operationId: "x_tweet",
   sourceId: "x",
   purpose: "social_intent_monitoring",
   scope: "social_content_read",
@@ -37,6 +43,7 @@ import { FRESH_SLACK_MS, type SelectableLead } from "./select";
  * thread's own title, so a live send and a test agree.
  */
 export async function newLeadsSince(projectId: string, since: Date): Promise<SelectableLead[]> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(REDDIT_ALERT_OP)) {
     return [];
   }
@@ -145,6 +152,7 @@ export function xAskLead(
  * A post X no longer shows is left out, as the tab leaves it out.
  */
 export async function newXLeadsSince(projectId: string, since: Date): Promise<SelectableLead[]> {
+  await ensureSourcePolicyFresh();
   if (!isSourceAuthorized(X_ALERT_OP)) {
     return [];
   }

@@ -66,7 +66,9 @@ export const sourceAuthAuditEvents = pgTable(
   "source_auth_audit_events",
   {
     id: text("id").primaryKey(),
-    recordId: text("record_id").notNull(),
+    recordId: text("record_id")
+      .notNull()
+      .references(() => sourceAuthRecords.recordId, { onDelete: "restrict" }),
     action: text("action").notNull(), // "REGISTER" | "APPROVE" | "UPDATE" | "REVOKE"
     performedBy: text("performed_by").notNull(),
     actorRole: text("actor_role").notNull(),
