@@ -37,6 +37,7 @@ import {
   REPLY_STALE_HOURS,
 } from "./constants";
 import { buyBio, joinedText, ParentWalkError, storedParents, walkParents } from "./context";
+import { isSourceAuthorized } from "@/lib/sourcePolicy";
 import { xEnabledFor } from "./enabled";
 import { candidateOf, judgeX, storedRoute } from "./judge";
 import { XLaneRefusedError } from "./grammar";
@@ -471,7 +472,7 @@ export async function runXScan(projectId: string, jobId: string | null): Promise
     .select({ id: projects.id, userId: projects.userId, name: projects.name, url: projects.url, scoring: projects.scoring })
     .from(projects)
     .where(eq(projects.id, projectId));
-  if (!project || !xEnabledFor(project.userId)) {
+  if (!project || !xEnabledFor(project.userId) || !isSourceAuthorized("x")) {
     return;
   }
   const [state] = await db().select().from(xProjects).where(eq(xProjects.projectId, projectId));

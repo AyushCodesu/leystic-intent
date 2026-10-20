@@ -3,6 +3,7 @@ import { PlanSections } from "@/components/product/PlanSections";
 import { ListSkeleton } from "@/components/Skeleton";
 import { requireLocalUser } from "@/lib/auth";
 import { requireActiveProject } from "@/lib/projects";
+import { isSourceAuthorized } from "@/lib/sourcePolicy";
 
 type SourcesPageProps = { searchParams: Promise<{ project?: string }> };
 
@@ -24,6 +25,17 @@ export default async function SourcesPage({ searchParams }: SourcesPageProps) {
           Where lurk looks for your buyers on Reddit.
         </p>
       </div>
+      {!isSourceAuthorized("reddit") && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-amber-200">
+          <div className="flex items-center gap-2 font-medium text-amber-300">
+            <span className="inline-block h-2 w-2 rounded-full bg-amber-400" />
+            Reddit Discovery and Scanning Inactive
+          </div>
+          <p className="mt-1 text-sm text-amber-200/80 leading-relaxed">
+            Live searches, subreddit listings, and profile scans are disabled under the source authorization gate. Configured sources will not be queried until a valid commercial agreement is authorized.
+          </p>
+        </div>
+      )}
       <Suspense fallback={<ListSkeleton rows={5} />}>
         <PlanSections projectId={project.id} userId={user.id} />
       </Suspense>

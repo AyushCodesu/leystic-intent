@@ -119,9 +119,7 @@ export async function recordUsage(input: {
 export async function fetchShared<T>(input: SharedFetch<T>): Promise<SharedResult<T>> {
   const { ctx, kind, sku, normalizedQuery } = input;
   const sourceId = sourceForSku(sku);
-  if (sourceId) {
-    assertSourceAuthorized(sourceId);
-  }
+  assertSourceAuthorized(sourceId);
   const sort = input.sort ?? null;
   const timeframe = input.timeframe ?? null;
   const variant = input.variant ?? "";

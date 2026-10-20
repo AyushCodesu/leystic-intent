@@ -133,6 +133,9 @@ export function xAskLead(
  * A post X no longer shows is left out, as the tab leaves it out.
  */
 export async function newXLeadsSince(projectId: string, since: Date): Promise<SelectableLead[]> {
+  if (!isSourceAuthorized("x")) {
+    return [];
+  }
   const rows = await db()
     .select({ lead: xLeads, post: xPosts, floor: X_FLOOR_SQL.mapWith(Number) })
     .from(xLeads)

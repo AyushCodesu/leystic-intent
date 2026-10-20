@@ -140,12 +140,15 @@ const schema = z.object({
 
   /**
    * Source authorization gate controls.
-   * Reddit is disabled by default unless explicitly enabled AND linked to a valid
-   * authorization record reference documented in docs/source-authorization-register.md.
+   * Reddit and third-party data sources are disabled by default unless explicitly
+   * enabled AND linked to a recognized, valid authorization record reference in
+   * the trusted authorization registry (docs/source-authorization-register.md).
    */
   REDDIT_SOURCE_ENABLED: z.preprocess(blankIsAbsent, bool),
   REDDIT_AUTH_RECORD_ID: optional(z.string()),
   X_AUTH_RECORD_ID: optional(z.string()),
+  GOOGLE_SERP_SOURCE_ENABLED: z.preprocess(blankIsAbsent, bool),
+  GOOGLE_SERP_AUTH_RECORD_ID: optional(z.string()),
 });
 
 export type Config = z.infer<typeof schema>;

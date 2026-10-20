@@ -643,3 +643,79 @@ Explicit Legal Boundary: Software gates enforce technical restrictions, isolate 
 * `npm run build`: Production build succeeded with Next.js Turbopack (35 static and dynamic routes compiled).
 * `git diff --check`: 0 whitespace errors.
 * Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all files.
+
+---
+
+## 16. P0: Fix Source Authorization Bypasses and Enforce the Authorization Register
+
+**Date**: October 2026<br/>
+**Commit Target**: `fix: eliminate source authorization bypasses and enforce trusted registry`
+
+### 1. Objective
+Eliminate all policy bypasses where non-approved sources could evaluate to `enabled: true`, establish an authoritative, typed Trusted Authorization Registry where `enabled` is a strict logical consequence of `status === "APPROVED"` (never an independent boolean that contradicts status), ensure arbitrary environment strings fail closed, isolate all read and alert pathways for unapproved sources, distinguish scraped vs. official Google SERP routes, and provide structured retention dry-run reporting.
+
+Explicit Legal Boundary: Software gates enforce technical restrictions, isolate unauthorized sources, and prevent accidental data leakage or spend; they do NOT establish or constitute legal authorization. Written permissions, contracts, and legal risk decisions remain external requirements.
+
+### 2. Authoritative Trusted Authorization Registry (`src/lib/sourcePolicy.ts`, `src/lib/config.ts`)
+* **Authoritative Typed Registry (`TrustedAuthRecord`)**:
+  * Implemented structured registry model with fields: `recordId`, `sourceId`, `name`, `status` (`PENDING`, `APPROVED`, `BLOCKED`, `EXPIRED`), `authorizedPurposes`, `scopes` (`SourceUsageScope`), `effectiveDate`, `expirationDate`, `evidenceReference`, and `approvalProvenance` (`approvedBy`, `reviewedAt`, `notes`).
+  * Seeded authoritative default records documented in `docs/source-authorization-register.md`:
+    * `REC-REDDIT-COMMERCIAL-UNVERIFIED` (`reddit`, `BLOCKED`)
+    * `REC-X-PILOT-REVIEW` (`x`, `PENDING`)
+    * `REC-GOOGLE-ANYAPI-SCRAPED` (`google_scraped_serp`, `BLOCKED`)
+    * `REC-GOOGLE-OFFICIAL-CSE` (`google_official_api`, `BLOCKED`)
+    * `REC-WEBSITE-CRAWLER-FIRST-PARTY` (`website_crawler`, `APPROVED`)
+* **Elimination of Arbitrary ID Granting**:
+  * An environment variable containing a fabricated or unknown record ID (e.g. `FABRICATED-REC-123`) is strictly rejected and fails closed.
+  * `enabled` is mathematically derived from `status === "APPROVED" && isRecordDateValid() && isRecordScopeValid()`. It can never be an independently trusted boolean that contradicts status.
+  * Temporal validity: records outside `[effectiveDate, expirationDate]` automatically fail closed (`EXPIRED` if past expiration, `PENDING` if future-dated).
+  * Scope validation: operations requesting an unauthorized scope evaluate to `enabled: false`.
+
+### 3. Resolution of Concrete Policy Defects
+* **Reddit**:
+  * Remains `BLOCKED` under current register status (`REC-REDDIT-COMMERCIAL-UNVERIFIED`).
+  * Setting `REDDIT_SOURCE_ENABLED=true` without an approved record fails closed. Pre-cache and pre-network execution gate at `fetchShared` preserved.
+* **X / Twitter**:
+  * Fixed defect where `X_LEADS=true` with pending record allowed `enabled=true`.
+  * Pending X status strictly denies paid calls, cache reuse, and serving of X data.
+  * Gated all 11 read queries in `src/lib/x/read.ts` (`listXLeads`, `xLeadById`, `listXHeld`, `listXFiltered`, `listXOpportunities`, `xEvaluationEntry`, `xEvaluationReplied`, `xThreadOf`, `listXFaces`, `newXLeadCount`, `listXLanes`).
+  * Gated X alert generation in `src/lib/alerts/leads.ts` (`newXLeadsSince`).
+  * `/app/x` renders an explicit amber disabled state banner rather than an empty list or 404 when X is unapproved.
+  * `runXScan` in `src/lib/x/run.ts` aborts immediately when `!isSourceAuthorized("x")`.
+* **Google SERP Route Reconciliation**:
+  * Separated scraped SERP via AnyAPI (`google_scraped_serp`, `BLOCKED` under `REC-GOOGLE-ANYAPI-SCRAPED`) from official Google Custom Search JSON API (`google_official_api`, `BLOCKED` unconfigured under `REC-GOOGLE-OFFICIAL-CSE`).
+* **Unclassified SKU Seam Protection**:
+  * `sourceForSku` maps `reddit.*`, `twitter.*`, and `google.*` SKUs.
+  * Unrecognized SKUs now throw `SourceUnauthorizedError` rather than returning `null`, preventing unclassified SKUs from bypassing `assertSourceAuthorized`.
+
+### 4. Retention Lifecycle and Dry-Run Reporting (`src/lib/retention.ts`)
+* **Structured Read-Only Retention Plan (`RetentionDryRunPlan`)**:
+  * Added `RetentionDryRunPlan` schema: `cutoffDate`, `eligiblePostsToDelete`, `preservedReferencedPosts` (breakdown across leads, SEO, and competitor mentions), `destructivePurgeBlockedWithoutOperatorApproval: true`, and explanatory notes.
+  * Integrated `dryRunPlan` into `auditRetention()`.
+  * `deleteExpiredPosts(now, batch, { dryRun: true })` reports eligible count without modifying or deleting database records.
+  * Destructive purges remain locked behind explicit operator approval.
+
+### 5. Regression Testing (`tests/sourceAuthorizationGate.test.ts`)
+* Complete 12-point regression suite:
+  1. Reddit remains blocked under current register status (`REC-REDDIT-COMMERCIAL-UNVERIFIED`) even with `REDDIT_SOURCE_ENABLED=true`.
+  2. Fabricated or unknown Reddit record ID (`FABRICATED-REC-123`) fails closed.
+  3. Missing, pending, blocked, expired, wrong-source, and wrong-scope records all fail closed.
+  4. X with `X_LEADS=true` and no approved record (or `REC-X-PILOT-REVIEW`) is disabled (`status: PENDING, enabled: false`).
+  5. X with plausible-looking but unrecognized record ID remains disabled (`status: BLOCKED, enabled: false`).
+  6. Google SERP routes have separate policy statuses (`google_scraped_serp` and `google_official_api` are both `BLOCKED`), and SKU mapping fails closed on unrecognized SKUs.
+  7. Denied sources cause zero paid provider calls at `fetchShared` boundary.
+  8. Cache and in-flight reuse cannot bypass authorization (checked before `findRun` and in-flight map).
+  9. Stored source data cannot leak through feeds, detail pages, alerts, API, or MCP (verified for both Reddit and X).
+  10. Explicitly approved test fixture registered via `registerTrustedAuthRecord` with valid scope and validity dates succeeds (`status: APPROVED, enabled: true`).
+  11. Authorized first-party website crawling continues to work normally.
+  12. Retention dry-run results (`auditRetention` and `deleteExpiredPosts(..., { dryRun: true })`) are correct, report structured plans, and trigger no destructive operations.
+
+### 6. Verification Results
+* `tests/sourceAuthorizationGate.test.ts`: 12 unit tests passed (3 database tests skipped when DB is offline).
+* `tests/xTab.test.ts`: 3 unit tests passed (1 database test skipped when DB is offline).
+* `npm run typecheck`: 0 errors.
+* `npm run lint`: 0 problems (0 errors, 0 warnings).
+* `npm test`: 83 test files passed (803 tests passed, 281 skipped database tests), 0 failures.
+* `npm run build`: Production build succeeded with Next.js Turbopack (35 static and dynamic routes compiled).
+* `git diff --check`: 0 whitespace errors.
+* Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all files.

@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { db } from "@/db";
+import { isSourceAuthorized } from "@/lib/sourcePolicy";
 import { handledThreads, jobs, projects, xAuthors, xEvaluations, xLanes, xLeads, xPosts, xProjects, xRuns } from "@/db/schema";
 import { xShownWhere, xWordsWhere } from "@/lib/leadFilters";
 import { atBounds, grainOf, type LeadFace } from "@/lib/feed";
@@ -262,6 +263,9 @@ export async function listXLeads(
   /** Null for every one in the filter: History counts and dates them all before its own cap. */
   limit: number | null = 200,
 ): Promise<XLeadCard[]> {
+  if (!isSourceAuthorized("x")) {
+    return [];
+  }
   const query = leadRows()
     .where(and(eq(xLeads.projectId, projectId), eq(xLeads.status, filter.status), isNull(xPosts.unavailableAt), whenWhere(filter), xShownWhere(), xLeadNotMuted()))
     .orderBy(desc(xPosts.createdAt), desc(xLeads.score));
@@ -277,6 +281,9 @@ export async function listXLeads(
  * just marked replied, hidden or not a fit leaves the list but stays open.
  */
 export async function xLeadById(projectId: string, leadId: string, now = new Date()): Promise<XLeadCard | null> {
+  if (!isSourceAuthorized("x")) {
+    return null;
+  }
   const [row] = await leadRows()
     .where(and(eq(xLeads.projectId, projectId), eq(xLeads.id, leadId), isNull(xPosts.unavailableAt)))
     .limit(1);
@@ -285,6 +292,9 @@ export async function xLeadById(projectId: string, leadId: string, now = new Dat
 
 /** The pile held for a look: posts the judge could not settle, from the window. */
 export async function listXHeld(projectId: string, filter: XFeedFilter = { days: FEED_WINDOW_DAYS, status: "new" }): Promise<XHeldCard[]> {
+  if (!isSourceAuthorized("x")) {
+    return [];
+  }
   const rows = await evaluationRows()
     .where(and(eq(xEvaluations.projectId, projectId), eq(xEvaluations.stage, "review"), isNull(xPosts.unavailableAt), whenWhere(filter)))
     .orderBy(desc(xPosts.createdAt))
@@ -381,6 +391,9 @@ function filteredCard({ evaluation, post, author, closeCall, worth }: Evaluation
  * detail.
  */
 export async function listXFiltered(projectId: string, filter: XFeedFilter = { days: FEED_WINDOW_DAYS, status: "new" }): Promise<XFiltered> {
+  if (!isSourceAuthorized("x")) {
+    return { items: [], judged: 0, screened: 0, unfinished: 0, closeCalls: 0, worth: 0, pending: 0 };
+  }
   const inWindow = and(eq(xEvaluations.projectId, projectId), isNull(xPosts.unavailableAt), whenWhere(filter));
   const [counts] = await db()
     .select({
@@ -533,6 +546,9 @@ export async function listXOpportunities(
   now = new Date(),
   includeReplies = true,
 ): Promise<XOpportunityFeed> {
+  if (!isSourceAuthorized("x")) {
+    return { items: [], total: 0, posts: 0, faces: [] };
+  }
   if (filter.status !== "new") {
     const [all, evidence] = await Promise.all([
       listXLeads(projectId, filter, now, null),
@@ -636,6 +652,9 @@ export async function listXOpportunities(
  * lead opens as that lead.
  */
 export async function xEvaluationEntry(projectId: string, evaluationId: string, now = new Date()): Promise<XEvaluationEntry | null> {
+  if (!isSourceAuthorized("x")) {
+    return null;
+  }
   const [row] = await evaluationRows()
     .where(and(eq(xEvaluations.projectId, projectId), eq(xEvaluations.id, evaluationId), isNull(xPosts.unavailableAt)))
     .limit(1);
@@ -660,6 +679,9 @@ export async function xEvaluationEntry(projectId: string, evaluationId: string, 
  * a mark on its conversation or on the post itself, the same two New hides it by.
  */
 export async function xEvaluationReplied(projectId: string, evaluationId: string): Promise<boolean> {
+  if (!isSourceAuthorized("x")) {
+    return false;
+  }
   const [row] = await db()
     .select({ id: handledThreads.id })
     .from(xEvaluations)
@@ -726,6 +748,9 @@ async function storedPost(id: string): Promise<typeof xPosts.$inferSelect | null
 
 /** The thread around one post, from stored posts only. */
 export async function xThreadOf(tweetId: string, viaId: string | null = null): Promise<XThread | null> {
+  if (!isSourceAuthorized("x")) {
+    return null;
+  }
   const post = await storedPost(tweetId);
   if (!post) {
     return null;
@@ -753,6 +778,9 @@ export async function xThreadOf(tweetId: string, viaId: string | null = null): P
 
 /** Everyone the project has an X ask from in the list's filter, as the people strip draws them. */
 export async function listXFaces(projectId: string, filter: XFeedFilter): Promise<LeadFace[]> {
+  if (!isSourceAuthorized("x")) {
+    return [];
+  }
   const rows = await db()
     .select({ id: xLeads.id, at: xPosts.createdAt, score: xLeads.score, author: xPosts.authorUsername, avatarUrl: xPosts.authorImage })
     .from(xLeads)
@@ -786,6 +814,9 @@ export async function listXFaces(projectId: string, filter: XFeedFilter): Promis
  * badge and it would stop meaning someone is asking.
  */
 export async function newXLeadCount(projectId: string): Promise<number> {
+  if (!isSourceAuthorized("x")) {
+    return 0;
+  }
   const [row] = await db()
     .select({ count: sql<number>`count(*)::int` })
     .from(xLeads)
@@ -829,6 +860,9 @@ export type XLaneView = {
 
 /** What lurk searches on X for this project, with what each search found, in rank order. */
 export async function listXLanes(projectId: string): Promise<XLaneView[]> {
+  if (!isSourceAuthorized("x")) {
+    return [];
+  }
   const rows = await db()
     .select()
     .from(xLanes)

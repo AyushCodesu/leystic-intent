@@ -10,13 +10,14 @@ Written agreements, provider contracts, and legal assessments remain external re
 
 ### Authorization Status Summary
 
-| Data Source | Access Seam / Provider | Intended Commercial Use | Current Status | Launch Blocker? |
-|---|---|---|---|---|
-| **Reddit** | AnyAPI Gateway (`reddit.*` SKUs) | Lead feeds, competitor intelligence, SEO tracking, alerts | **BLOCKED** | **YES (P0 Launch Blocker)** |
-| **X / Twitter** | AnyAPI Gateway (`twitter.*` SKUs) | Buyer intent and reply-opportunity discovery | **BLOCKED** (Feature flag off: `X_LEADS=false`) | Conditional (off by default) |
-| **Google Search (SERP)** | AnyAPI Gateway (`google.search`) | Discovery phrasing queries and SERP snippet observation | **PENDING / BLOCKED** (Downstream thread reads blocked) | Bound to Reddit status |
-| **Customer Websites** | First-Party Web Crawler (`src/lib/gaps/crawler.ts`) | Demand-to-page gap analysis on customer-owned domains | **APPROVED** (First-party scoped) | No |
-| **LLM Inference** | OpenRouter / Vercel AI Gateway | Lead scoring, reason categorization, brief synthesis | **APPROVED** (Subject to DPA terms) | No |
+| Data Source | Access Seam / Provider | Intended Commercial Use | Current Status | Authoritative Record ID | Launch Blocker? |
+|---|---|---|---|---|---|
+| **Reddit** | AnyAPI Gateway (`reddit.*` SKUs) | Lead feeds, competitor intelligence, SEO tracking, alerts | **BLOCKED** | `REC-REDDIT-COMMERCIAL-UNVERIFIED` | **YES (P0 Launch Blocker)** |
+| **X / Twitter** | AnyAPI Gateway (`twitter.*` SKUs) | Buyer intent and reply-opportunity discovery | **PENDING** | `REC-X-PILOT-REVIEW` | Conditional (off by default) |
+| **Google Scraped SERP** | AnyAPI Gateway (`google.search`) | Discovery phrasing queries and SERP snippet observation | **BLOCKED** | `REC-GOOGLE-ANYAPI-SCRAPED` | Bound to Reddit status |
+| **Google Official API** | Official Google Custom Search Engine (CSE) | Discovery phrasing queries via official API | **BLOCKED** (Unconfigured) | `REC-GOOGLE-OFFICIAL-CSE` | No |
+| **Customer Websites** | First-Party Web Crawler (`src/lib/gaps/crawler.ts`) | Demand-to-page gap analysis on customer-owned domains | **APPROVED** | `REC-WEBSITE-CRAWLER-FIRST-PARTY` | No |
+| **LLM Inference** | OpenRouter / Vercel AI Gateway | Lead scoring, reason categorization, brief synthesis | **APPROVED** | Multi-provider DPA | No |
 
 ---
 
@@ -60,16 +61,20 @@ Written agreements, provider contracts, and legal assessments remain external re
   * Displayed in dedicated X tab (`src/app/app/x/page.tsx`).
   * Managed under separate feature toggle `X_LEADS`.
 
-### 2.3 Google SERP Pipeline (via AnyAPI)
+### 2.3 Google SERP Routes
 
-* **Endpoints & SKUs**:
-  * `google.search` (`src/lib/seo/fetch.ts:googleSearch`): English US search queries formatted as `${keyword} reddit`.
-* **Storage Tables**:
-  * `serp_results`, `discovery_evidence`.
-* **Downstream Usage**:
-  * Filters Google results for Reddit URLs (`src/lib/seo/links.ts:redditResults`).
-  * Passes discovered Reddit URLs to `reddit.post` for thread retrieval.
-  * Downstream usage is strictly bound by Reddit authorization status.
+The architecture distinguishes two separate Google search mechanisms:
+
+1. **Scraped SERP via AnyAPI (`google_scraped_serp`)**:
+   * Endpoint / SKU: `google.search` (`src/lib/seo/fetch.ts:googleSearch`).
+   * Access Method: Third-party scraping gateway.
+   * Status: **BLOCKED** (`REC-GOOGLE-ANYAPI-SCRAPED`). AnyAPI scraping lacks direct license from Google.
+   * Downstream Restriction: Passing discovered Reddit URLs to `reddit.post` is also blocked unless Reddit is authorized.
+
+2. **Official Google Custom Search JSON API (`google_official_api`)**:
+   * Access Method: Direct REST requests to Google Custom Search JSON API using dedicated Google Cloud project credentials and commercial billing.
+   * Status: **BLOCKED / UNCONFIGURED** (`REC-GOOGLE-OFFICIAL-CSE`). Requires configured Google API keys and Custom Search Engine ID (CSE ID).
+   * Intended Deployment: Public ranking observation for discovery keywords.
 
 ### 2.4 First-Party Target Website Crawler
 
@@ -84,9 +89,35 @@ Written agreements, provider contracts, and legal assessments remain external re
 
 ## 3. Source Authorization Register
 
-### Source Register Detail Cards
+### Trusted Authorization Registry Schema
 
-#### Provider 1: Reddit Inc. (Accessed via AnyAPI Gateway)
+Every managed source is governed by an authoritative record in the trusted registry (`src/lib/sourcePolicy.ts`):
+
+```ts
+export type TrustedAuthRecord = {
+  recordId: string;
+  sourceId: DataSourceId;
+  name: string;
+  status: SourceAuthStatus; // "PENDING" | "APPROVED" | "BLOCKED" | "EXPIRED"
+  authorizedPurposes: string[];
+  scopes: string[];
+  effectiveDate?: string;
+  expirationDate?: string;
+  evidenceReference: string;
+  approvalProvenance: {
+    reviewer: string;
+    reviewedAt: string;
+    notes: string;
+  };
+};
+```
+
+Software treats this registry as the sole source of truth. Setting an environment variable to a fabricated record ID fails closed. Software enforces that `enabled = true` only when a recognized record has status `APPROVED`, falls within valid temporal bounds, and matches the requested operation scope.
+
+### Authoritative Registered Records
+
+#### Record 1: Reddit Commercial Gate (`REC-REDDIT-COMMERCIAL-UNVERIFIED`)
+* **Source ID**: `reddit`
 * **Access Method**: AnyAPI gateway proxy endpoints (`reddit.search`, `reddit.post`, `reddit.post_comments`, `reddit.subreddit_details`, `reddit.subreddit_posts`, `reddit.avatar`).
 * **Intended Deployment**: Multi-tenant commercial B2B SaaS. Public buyer-intent extraction, competitor dissatisfaction tracking, and lead feeds displayed to paying users.
 * **Applicable Terms**:
@@ -105,29 +136,46 @@ Written agreements, provider contracts, and legal assessments remain external re
   * Explicit confirmation of permitted retention, display, attribution, and user deletion handling.
 * **Permitted Scope Until Authorized**: NONE. All requests and cache reads must fail closed.
 
-#### Provider 2: X Corp. (Accessed via AnyAPI Gateway)
+#### Record 2: X / Twitter Pilot Review (`REC-X-PILOT-REVIEW`)
+* **Source ID**: `x`
 * **Access Method**: AnyAPI gateway proxy endpoints (`twitter.search`, `twitter.tweet`, `twitter.profile`).
 * **Intended Deployment**: B2B SaaS buyer-intent identification from public tweets and replies.
 * **Applicable Terms**:
   * X Developer Agreement and Policy: https://developer.x.com/en/more/developer-terms/agreement-and-policy
   * Review Date: October 2026.
-* **Status**: **BLOCKED / PENDING**
+* **Status**: **PENDING** (`enabled: false`)
 * **Status Rationale**:
   * Direct X API commercial licensing is required for enterprise SaaS ingestion. Feature is currently dark (`X_LEADS=false`).
+  * Under pending status, paid provider calls, cache reuse, and serving of X-derived data are strictly denied.
 * **Required Evidence to Enable**:
   * Direct X Developer API tier contract or written provider authorization.
-  * Explicit setting of `X_LEADS=true` and documented record reference `X_AUTH_RECORD_ID`.
+  * Execution of commercial license and updating record status to `APPROVED`.
 
-#### Provider 3: Google Search (Accessed via AnyAPI Gateway)
+#### Record 3: Google Scraped SERP (`REC-GOOGLE-ANYAPI-SCRAPED`)
+* **Source ID**: `google_scraped_serp`
 * **Access Method**: AnyAPI gateway proxy (`google.search`).
 * **Intended Deployment**: Discovery of public web search ranking positions for product problem phrasings.
 * **Applicable Terms**:
   * Google Terms of Service: https://policies.google.com/terms
   * Review Date: October 2026.
-* **Status**: **PENDING / BLOCKED** (for scraped SERP); **APPROVED** only when using official Google Custom Search JSON API with commercial billing.
-* **Downstream Restriction**: Even if search phrasing rankings are retrieved, opening discovered Reddit links is blocked unless Reddit authorization is established.
+* **Status**: **BLOCKED**
+* **Status Rationale**:
+  * Third-party scraped SERP lacks a commercial license from Google.
+* **Downstream Restriction**: Discovered Reddit links cannot be fetched or processed while Reddit authorization is blocked.
 
-#### Provider 4: Customer Website Crawler (`src/lib/gaps/crawler.ts`)
+#### Record 4: Google Official Custom Search API (`REC-GOOGLE-OFFICIAL-CSE`)
+* **Source ID**: `google_official_api`
+* **Access Method**: Direct REST calls to Google Custom Search JSON API with dedicated Google Cloud billing.
+* **Intended Deployment**: Keyword phrasing ranking observation via official Google APIs.
+* **Applicable Terms**:
+  * Google Cloud APIs Terms of Service: https://cloud.google.com/terms/service-terms
+  * Review Date: October 2026.
+* **Status**: **BLOCKED** (Unconfigured)
+* **Required Evidence to Enable**:
+  * Provisioned Google Cloud billing project, approved CSE ID, and verified API key.
+
+#### Record 5: Customer Website Crawler (`REC-WEBSITE-CRAWLER-FIRST-PARTY`)
+* **Source ID**: `website_crawler`
 * **Access Method**: First-party HTTP/HTTPS client with socket-level IP connection pinning and strict DNS rebinding validation.
 * **Intended Deployment**: Inspection of customer-owned websites configured by authenticated project owners.
 * **Applicable Terms**:
@@ -136,7 +184,7 @@ Written agreements, provider contracts, and legal assessments remain external re
 * **Status**: **APPROVED**
 * **Permitted Scope**: First-party customer root URLs and sitemaps only. Disallows crawling third-party domains without owner authentication.
 
-#### Provider 5: LLM Inference Providers (OpenRouter / Vercel AI Gateway)
+#### LLM Inference Providers (OpenRouter / Vercel AI Gateway)
 * **Access Method**: API client calls to OpenRouter (`meta/muse-spark-1.3-contributor`) and AI Gateway (`typesafe-ai/jev`).
 * **Intended Deployment**: Structured inference, reason extraction, and brief generation.
 * **Applicable Terms**:
@@ -152,16 +200,23 @@ Written agreements, provider contracts, and legal assessments remain external re
 
 To ensure software cannot inadvertently violate authorization boundaries, the repository enforces a technical fail-closed source gate (`src/lib/sourcePolicy.ts`):
 
-1. **Default State**:
-   * `REDDIT_SOURCE_ENABLED` defaults to `false`.
-   * Without explicit configuration, all Reddit ingestion, cache reuse, and downstream serving paths fail closed.
+1. **Authoritative Registry Lookup**:
+   * A source is enabled only if its authorization record exists in the trusted registry and is explicitly `APPROVED`.
+   * Fabricated or unlisted record IDs fail closed immediately.
+   * Temporal validity is enforced: `effectiveDate <= now <= expirationDate`. Expired or future-dated records evaluate to `enabled: false`.
+   * Scope validation: Requested purpose must match `authorizedPurposes` and `scopes`.
 2. **Double-Check Invariant**:
-   * Setting `REDDIT_SOURCE_ENABLED=true` alone is rejected as invalid configuration.
-   * An operator must also provide `REDDIT_AUTH_RECORD_ID` referencing an executed contract or verified entry in this register.
-   * Placeholder values (`none`, `pending`, `test`, `todo`, `unverified`) fail closed.
+   * Setting an enablement flag (`REDDIT_SOURCE_ENABLED=true`, `X_LEADS=true`, `GOOGLE_SERP_SOURCE_ENABLED=true`) without an approved trusted record is rejected.
+   * `enabled` is a strict logical consequence of `status === "APPROVED"`; it can never be an independent boolean that contradicts status.
 3. **Execution Seam Enforcement**:
-   * `src/lib/reddit/fetch.ts:fetchShared`: Checks `assertSourceAuthorized(sourceForSku(sku))` before querying `searchRuns` (blocking cache reuse) and before calling AnyAPI (blocking paid network calls).
-4. **Serving Path Isolation**:
+   * `src/lib/reddit/fetch.ts:fetchShared`: Calls `assertSourceAuthorized(sourceForSku(sku))` before querying `searchRuns` (blocking cache reuse) and before calling AnyAPI (blocking paid network calls).
+   * SKU Mapping: `sourceForSku` maps `reddit.*`, `twitter.*`, and `google.*` SKUs. Unrecognized SKUs throw `SourceUnauthorizedError` to fail closed.
+4. **Serving Path and Read Isolation**:
+   * Feeds (`src/lib/leads.ts`), competitor reads (`src/lib/competitors/read.ts`), and SEO reads (`src/lib/seo/read.ts`) return empty results when Reddit is unauthorized.
+   * X read queries (`src/lib/x/read.ts`) and alerts (`src/lib/alerts/leads.ts:newXLeadsSince`) return empty results when X is unauthorized.
+   * UI pages (`src/app/app/x/page.tsx`, `src/app/app/sources/page.tsx`) display explicit, amber disabled-state banners explaining current authorization status instead of misleading empty sets.
+   * Public API endpoints (`src/lib/api/handlers.ts`) reject requests for unauthorized sources with typed error `source_disabled` (HTTP 403).
+   * Alert channels suppress unauthorized source excerpts from being broadcast to Slack, Discord, or Email.
    * Feeds (`src/lib/leads.ts`), competitor reads (`src/lib/competitors/read.ts`), and SEO reads (`src/lib/seo/read.ts`) return empty results and display clear, non-misleading disabled-state notifications rather than pretending searches were performed and yielded zero results.
    * Public API endpoints (`src/lib/api/handlers.ts`) reject requests for unauthorized sources with typed error `source_disabled` (HTTP 403).
    * Alert channels (`src/lib/alerts/leads.ts`) suppress unauthorized source excerpts from being broadcast to Slack, Discord, or Email.
@@ -200,7 +255,11 @@ To ensure software cannot inadvertently violate authorization boundaries, the re
 3. **Attribution & Excerpt Display**: Leystic displays excerpts (`EXCERPT_CHARS = 280`) and links to the original Reddit thread (`LEAD_URL`). If the thread is deleted, the canonical link becomes a 404, but stored excerpts remain in `reddit_posts` until the retention job runs.
 
 ### Operator Actions & Deletion Playbook
-- **Dry-Run Audit**: Operators can run `auditRetention()` at any time to inspect row counts, retention justifications, and eligible cleanup volumes without modifying data.
+- **Dry-Run Audit & Plan**: Operators can call `auditRetention()` or `deleteExpiredPosts(now, batch, { dryRun: true })` at any time. `auditRetention()` returns a structured `RetentionDryRunPlan` including:
+  * `cutoffDate`: ISO timestamp representing the 30-day cutoff threshold.
+  * `eligiblePostsToDelete`: count of expired posts without references.
+  * `preservedReferencedPosts`: breakdown of preserved posts referenced by `leads`, `seoOpportunities`, and `competitorMentions`.
+  * `destructivePurgeBlockedWithoutOperatorApproval: true`: confirmation that destructive purging is prevented.
 - **Controlled Deletion**: Destructive cleanup of orphaned or expired records must never run as an automated unmonitored script. The scheduler runs only bounded batches (`RETENTION_BATCH = 500`).
 - **Data Erasure Requests**: If an individual submits an erasure request for their Reddit username or post, the operator must execute a targeted database deletion across `reddit_posts`, `reddit_comments`, and `reddit_authors`.
 

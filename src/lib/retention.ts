@@ -161,6 +161,19 @@ export type RetentionBreakdown = {
   eligibleForDeletion: number;
 };
 
+export type RetentionDryRunPlan = {
+  cutoffDate: string;
+  eligiblePostsToDelete: number;
+  preservedReferencedPosts: {
+    byLeads: number;
+    bySeo: number;
+    byCompetitorMentions: number;
+    totalPreserved: number;
+  };
+  destructivePurgeBlockedWithoutOperatorApproval: boolean;
+  notes: string;
+};
+
 export type RetentionAuditReport = {
   auditTimestamp: string;
   retentionWindowDays: number;
@@ -186,6 +199,7 @@ export type RetentionAuditReport = {
     totalAuthors: number;
     expiredAuthors: number;
   };
+  dryRunPlan: RetentionDryRunPlan;
   limitations: string[];
 };
 
@@ -341,6 +355,19 @@ export async function auditRetention(now = new Date()): Promise<RetentionAuditRe
       expiredPosts: Number(expiredXPostsRow[0]?.count ?? 0),
       totalAuthors: Number(totalXAuthorsRow[0]?.count ?? 0),
       expiredAuthors: Number(expiredXAuthorsRow[0]?.count ?? 0),
+    },
+    dryRunPlan: {
+      cutoffDate: cutoff.toISOString(),
+      eligiblePostsToDelete: eligibleForDeletion,
+      preservedReferencedPosts: {
+        byLeads: retainedByLeads,
+        bySeo: retainedBySeo,
+        byCompetitorMentions: retainedByCompetitorMentions,
+        totalPreserved: retainedByLeads + retainedBySeo + retainedByCompetitorMentions,
+      },
+      destructivePurgeBlockedWithoutOperatorApproval: true,
+      notes:
+        "Read-only retention plan. Referenced posts (leads, SEO, competitors) are preserved. Destructive bulk purges require operator approval.",
     },
     limitations: [
       "AnyAPI gateway provides no webhooks or deletion events for user-deleted Reddit posts or comments.",
