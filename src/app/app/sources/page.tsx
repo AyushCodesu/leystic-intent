@@ -3,7 +3,7 @@ import { PlanSections } from "@/components/product/PlanSections";
 import { ListSkeleton } from "@/components/Skeleton";
 import { requireLocalUser } from "@/lib/auth";
 import { requireActiveProject } from "@/lib/projects";
-import { isSourceAuthorized } from "@/lib/sourcePolicy";
+import { getSourcePolicy } from "@/lib/sourcePolicy";
 
 type SourcesPageProps = { searchParams: Promise<{ project?: string }> };
 
@@ -14,6 +14,7 @@ type SourcesPageProps = { searchParams: Promise<{ project?: string }> };
 export default async function SourcesPage({ searchParams }: SourcesPageProps) {
   const user = await requireLocalUser();
   const project = await requireActiveProject(user.id, (await searchParams).project);
+  const redditPolicy = getSourcePolicy("reddit");
 
   return (
     <div className="flex max-w-5xl flex-col gap-6">
@@ -25,7 +26,7 @@ export default async function SourcesPage({ searchParams }: SourcesPageProps) {
           Where lurk looks for your buyers on Reddit.
         </p>
       </div>
-      {!isSourceAuthorized("reddit") && (
+      {!redditPolicy.enabled && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-amber-200">
           <div className="flex items-center gap-2 font-medium text-amber-300">
             <span className="inline-block h-2 w-2 rounded-full bg-amber-400" />

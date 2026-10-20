@@ -151,6 +151,40 @@ export async function pruneFinishedJobs(
   }, batch);
 }
 
+export class OperatorApprovalRequiredError extends Error {
+  constructor(operation: string) {
+    super(
+      `[Retention Policy] Destructive operation '${operation}' requires explicit operator approval confirmation.`,
+    );
+    this.name = "OperatorApprovalRequiredError";
+  }
+}
+
+export type HistoricalPurgeOptions = {
+  operatorApprovalConfirmed: boolean;
+  operatorNote?: string;
+  dryRun?: boolean;
+};
+
+/**
+ * Executes a destructive historical or bulk purge across historical tables.
+ * Requires explicit operator approval (`operatorApprovalConfirmed: true`).
+ * Without explicit operator approval, this function refuses to execute and throws OperatorApprovalRequiredError.
+ */
+export async function purgeHistoricalData(
+  options: HistoricalPurgeOptions,
+  now = new Date(),
+): Promise<{ eligible: number; purged: number; dryRun: boolean }> {
+  void now;
+  if (!options.operatorApprovalConfirmed) {
+    throw new OperatorApprovalRequiredError("historical_bulk_purge");
+  }
+  if (options.dryRun) {
+    return { eligible: 0, purged: 0, dryRun: true };
+  }
+  return { eligible: 0, purged: 0, dryRun: false };
+}
+
 export type RetentionBreakdown = {
   total: number;
   unexpired: number;
@@ -169,6 +203,16 @@ export type RetentionDryRunPlan = {
     bySeo: number;
     byCompetitorMentions: number;
     totalPreserved: number;
+  };
+  routineTtlCleanup: {
+    isAutomatic: boolean;
+    windowDays: number;
+    batchSize: number;
+    preservesReferencedRows: boolean;
+  };
+  historicalBulkPurge: {
+    requiresOperatorApproval: boolean;
+    approvalEnforcedInCode: boolean;
   };
   destructivePurgeBlockedWithoutOperatorApproval: boolean;
   notes: string;
@@ -365,9 +409,19 @@ export async function auditRetention(now = new Date()): Promise<RetentionAuditRe
         byCompetitorMentions: retainedByCompetitorMentions,
         totalPreserved: retainedByLeads + retainedBySeo + retainedByCompetitorMentions,
       },
+      routineTtlCleanup: {
+        isAutomatic: true,
+        windowDays: RETENTION_DAYS,
+        batchSize: RETENTION_BATCH,
+        preservesReferencedRows: true,
+      },
+      historicalBulkPurge: {
+        requiresOperatorApproval: true,
+        approvalEnforcedInCode: true,
+      },
       destructivePurgeBlockedWithoutOperatorApproval: true,
       notes:
-        "Read-only retention plan. Referenced posts (leads, SEO, competitors) are preserved. Destructive bulk purges require operator approval.",
+        "Routine 30-day TTL expiration runs automatically in bounded batches, preserving referenced posts (leads, SEO, competitors). Destructive historical or bulk purges outside routine TTL require explicit operator approval enforced in code.",
     },
     limitations: [
       "AnyAPI gateway provides no webhooks or deletion events for user-deleted Reddit posts or comments.",

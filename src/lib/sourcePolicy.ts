@@ -11,19 +11,37 @@ export type SourceId =
 
 export type SourceAuthStatus = "PENDING" | "APPROVED" | "BLOCKED" | "EXPIRED";
 
-export type SourceUsageScope =
-  | "read_only_audit"
-  | "commercial_indexing"
-  | "search_discovery"
-  | "social_intent_monitoring"
-  | "test_scope";
+export const SOURCE_USAGE_PURPOSES = [
+  "commercial_lead_generation",
+  "competitor_intelligence",
+  "seo_opportunity_discovery",
+  "customer_website_coverage",
+  "social_intent_monitoring",
+  "read_only_audit",
+  "academic_research",
+] as const;
+
+export type SourceUsagePurpose = (typeof SOURCE_USAGE_PURPOSES)[number];
+
+export const SOURCE_USAGE_SCOPES = [
+  "search_discovery",
+  "social_content_read",
+  "comments_read",
+  "customer_domain_crawl",
+  "commercial_indexing",
+  "social_intent_monitoring",
+  "read_only_audit",
+  "test_scope",
+] as const;
+
+export type SourceUsageScope = (typeof SOURCE_USAGE_SCOPES)[number];
 
 export type TrustedAuthRecord = {
   recordId: string;
   sourceId: SourceId;
   name: string;
   status: SourceAuthStatus;
-  authorizedPurposes: string[];
+  authorizedPurposes: SourceUsagePurpose[];
   scopes: SourceUsageScope[];
   effectiveDate: string; // ISO 8601
   expirationDate: string | null; // ISO 8601 or null
@@ -35,6 +53,21 @@ export type TrustedAuthRecord = {
   };
 };
 
+export type SourceOperationRequest = {
+  sourceId: SourceId;
+  purpose: SourceUsagePurpose;
+  scope: SourceUsageScope;
+  now?: Date;
+  authRecordIdOverride?: string;
+};
+
+export type SourcePolicyOptions = {
+  now?: Date;
+  purpose?: SourceUsagePurpose;
+  scope?: SourceUsageScope;
+  authRecordIdOverride?: string;
+};
+
 export type SourcePolicy = {
   sourceId: SourceId;
   name: string;
@@ -42,6 +75,10 @@ export type SourcePolicy = {
   enabled: boolean;
   authRecordId: string | null;
   commercialUsePermitted: boolean;
+  authorizedPurposes: SourceUsagePurpose[];
+  authorizedScopes: SourceUsageScope[];
+  requestedPurpose?: SourceUsagePurpose;
+  requestedScope?: SourceUsageScope;
   reason: string;
   legalDisclaimer: string;
   record?: TrustedAuthRecord | null;
@@ -63,6 +100,13 @@ export class SourceUnauthorizedError extends Error {
     this.sourceId = sourceId;
     this.status = status;
     this.recordId = recordId;
+  }
+}
+
+export class InvalidAuthRecordError extends Error {
+  constructor(message: string) {
+    super(`[Invalid Authorization Record] ${message}`);
+    this.name = "InvalidAuthRecordError";
   }
 }
 
@@ -88,11 +132,16 @@ const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
     name: "Reddit (via AnyAPI Gateway)",
     status: "BLOCKED",
     authorizedPurposes: [
-      "Commercial lead generation",
-      "Competitor dissatisfaction tracking",
-      "SEO ranking opportunity detection",
+      "commercial_lead_generation",
+      "competitor_intelligence",
+      "seo_opportunity_discovery",
     ],
-    scopes: ["commercial_indexing"],
+    scopes: [
+      "commercial_indexing",
+      "search_discovery",
+      "social_content_read",
+      "comments_read",
+    ],
     effectiveDate: "2026-10-01T00:00:00.000Z",
     expirationDate: null,
     evidenceReference: "https://www.redditinc.com/policies/data-api-terms (Direct commercial contract not executed)",
@@ -107,8 +156,12 @@ const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
     sourceId: "x",
     name: "X / Twitter (via AnyAPI Gateway)",
     status: "PENDING",
-    authorizedPurposes: ["Social buyer intent discovery"],
-    scopes: ["social_intent_monitoring"],
+    authorizedPurposes: ["social_intent_monitoring"],
+    scopes: [
+      "social_intent_monitoring",
+      "search_discovery",
+      "social_content_read",
+    ],
     effectiveDate: "2026-10-01T00:00:00.000Z",
     expirationDate: null,
     evidenceReference: "https://developer.x.com/en/more/developer-terms/agreement-and-policy",
@@ -123,7 +176,7 @@ const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
     sourceId: "google_scraped_serp",
     name: "Google Search (AnyAPI Scraped SERP)",
     status: "BLOCKED",
-    authorizedPurposes: ["Web search phrasing discovery"],
+    authorizedPurposes: ["seo_opportunity_discovery"],
     scopes: ["search_discovery"],
     effectiveDate: "2026-10-01T00:00:00.000Z",
     expirationDate: null,
@@ -139,7 +192,7 @@ const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
     sourceId: "google_official_api",
     name: "Google Custom Search (Official API)",
     status: "BLOCKED",
-    authorizedPurposes: ["Web search phrasing discovery"],
+    authorizedPurposes: ["seo_opportunity_discovery"],
     scopes: ["search_discovery"],
     effectiveDate: "2026-10-01T00:00:00.000Z",
     expirationDate: null,
@@ -155,8 +208,8 @@ const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
     sourceId: "website_crawler",
     name: "Target Website Web Crawler",
     status: "APPROVED",
-    authorizedPurposes: ["First-party customer landing page and sitemap inspection"],
-    scopes: ["read_only_audit"],
+    authorizedPurposes: ["customer_website_coverage", "read_only_audit"],
+    scopes: ["customer_domain_crawl", "read_only_audit"],
     effectiveDate: "2026-01-01T00:00:00.000Z",
     expirationDate: null,
     evidenceReference: "Customer Service Agreement (First-Party Domain Verification)",
@@ -168,25 +221,192 @@ const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
   },
 ];
 
+function cloneAndFreezeRecord(record: TrustedAuthRecord): TrustedAuthRecord {
+  const cloned: TrustedAuthRecord = {
+    recordId: record.recordId,
+    sourceId: record.sourceId,
+    name: record.name,
+    status: record.status,
+    authorizedPurposes: [...record.authorizedPurposes],
+    scopes: [...record.scopes],
+    effectiveDate: record.effectiveDate,
+    expirationDate: record.expirationDate,
+    evidenceReference: record.evidenceReference,
+    approvalProvenance: {
+      approvedBy: record.approvalProvenance.approvedBy,
+      reviewedAt: record.approvalProvenance.reviewedAt,
+      notes: record.approvalProvenance.notes,
+    },
+  };
+  Object.freeze(cloned.authorizedPurposes);
+  Object.freeze(cloned.scopes);
+  Object.freeze(cloned.approvalProvenance);
+  return Object.freeze(cloned);
+}
+
+export function validateTrustedAuthRecord(record: unknown): TrustedAuthRecord {
+  if (!record || typeof record !== "object") {
+    throw new InvalidAuthRecordError("Record must be a non-null object.");
+  }
+  const r = record as Record<string, unknown>;
+
+  if (typeof r.recordId !== "string" || !r.recordId.trim()) {
+    throw new InvalidAuthRecordError("recordId must be a non-empty string.");
+  }
+  const recordId = r.recordId.trim();
+  if (PLACEHOLDER_RECORD_IDS.has(recordId.toLowerCase())) {
+    throw new InvalidAuthRecordError(`recordId cannot be a placeholder string ('${recordId}').`);
+  }
+
+  const validSources: SourceId[] = [
+    "reddit",
+    "x",
+    "google_scraped_serp",
+    "google_official_api",
+    "google_serp",
+    "website_crawler",
+    "unclassified",
+  ];
+  if (!validSources.includes(r.sourceId as SourceId)) {
+    throw new InvalidAuthRecordError(`Invalid sourceId '${String(r.sourceId)}'.`);
+  }
+  const sourceId = r.sourceId as SourceId;
+
+  if (typeof r.name !== "string" || !r.name.trim()) {
+    throw new InvalidAuthRecordError("name must be a non-empty string.");
+  }
+
+  const validStatuses: SourceAuthStatus[] = ["PENDING", "APPROVED", "BLOCKED", "EXPIRED"];
+  if (!validStatuses.includes(r.status as SourceAuthStatus)) {
+    throw new InvalidAuthRecordError(`Invalid status '${String(r.status)}'.`);
+  }
+  const status = r.status as SourceAuthStatus;
+
+  if (!Array.isArray(r.authorizedPurposes) || r.authorizedPurposes.length === 0) {
+    throw new InvalidAuthRecordError("authorizedPurposes must be a non-empty array.");
+  }
+  for (const p of r.authorizedPurposes) {
+    if (!SOURCE_USAGE_PURPOSES.includes(p as SourceUsagePurpose)) {
+      throw new InvalidAuthRecordError(`Unsupported purpose '${String(p)}'.`);
+    }
+  }
+  const authorizedPurposes = [...r.authorizedPurposes] as SourceUsagePurpose[];
+
+  if (!Array.isArray(r.scopes) || r.scopes.length === 0) {
+    throw new InvalidAuthRecordError("scopes must be a non-empty array.");
+  }
+  for (const s of r.scopes) {
+    if (!SOURCE_USAGE_SCOPES.includes(s as SourceUsageScope)) {
+      throw new InvalidAuthRecordError(`Unsupported scope '${String(s)}'.`);
+    }
+  }
+  const scopes = [...r.scopes] as SourceUsageScope[];
+
+  if (typeof r.effectiveDate !== "string" || isNaN(new Date(r.effectiveDate).getTime())) {
+    throw new InvalidAuthRecordError(`Invalid effectiveDate '${String(r.effectiveDate)}'.`);
+  }
+  const effectiveDate = r.effectiveDate;
+
+  let expirationDate: string | null = null;
+  if (r.expirationDate !== null && r.expirationDate !== undefined) {
+    if (typeof r.expirationDate !== "string" || isNaN(new Date(r.expirationDate).getTime())) {
+      throw new InvalidAuthRecordError(`Invalid expirationDate '${String(r.expirationDate)}'.`);
+    }
+    if (new Date(effectiveDate).getTime() > new Date(r.expirationDate).getTime()) {
+      throw new InvalidAuthRecordError(
+        `effectiveDate '${effectiveDate}' cannot be after expirationDate '${r.expirationDate}'.`,
+      );
+    }
+    expirationDate = r.expirationDate;
+  }
+
+  if (typeof r.evidenceReference !== "string" || !r.evidenceReference.trim()) {
+    throw new InvalidAuthRecordError("evidenceReference must be a non-empty string.");
+  }
+
+  if (!r.approvalProvenance || typeof r.approvalProvenance !== "object") {
+    throw new InvalidAuthRecordError("approvalProvenance must be a non-null object.");
+  }
+  const prov = r.approvalProvenance as Record<string, unknown>;
+  if (typeof prov.approvedBy !== "string" || !prov.approvedBy.trim()) {
+    throw new InvalidAuthRecordError("approvalProvenance.approvedBy must be a non-empty string.");
+  }
+  if (typeof prov.reviewedAt !== "string" || isNaN(new Date(prov.reviewedAt).getTime())) {
+    throw new InvalidAuthRecordError(`approvalProvenance.reviewedAt must be a valid date ('${String(prov.reviewedAt)}').`);
+  }
+  if (typeof prov.notes !== "string" || !prov.notes.trim()) {
+    throw new InvalidAuthRecordError("approvalProvenance.notes must be a non-empty string.");
+  }
+
+  return {
+    recordId,
+    sourceId,
+    name: r.name.trim(),
+    status,
+    authorizedPurposes,
+    scopes,
+    effectiveDate,
+    expirationDate,
+    evidenceReference: r.evidenceReference.trim(),
+    approvalProvenance: {
+      approvedBy: prov.approvedBy.trim(),
+      reviewedAt: prov.reviewedAt,
+      notes: prov.notes.trim(),
+    },
+  };
+}
+
 const registryStore = new Map<string, TrustedAuthRecord>();
 
 function initRegistry(): void {
   registryStore.clear();
   for (const record of DEFAULT_TRUSTED_REGISTRY) {
-    registryStore.set(record.recordId, record);
+    const validated = validateTrustedAuthRecord(record);
+    registryStore.set(validated.recordId, cloneAndFreezeRecord(validated));
   }
 }
 
 initRegistry();
 
-/** Looks up a trusted record by its stable identifier. */
+/** Looks up a trusted record by its stable identifier. Returns an immutable frozen clone. */
 export function getTrustedRecord(recordId: string): TrustedAuthRecord | null {
-  return registryStore.get(recordId.trim()) ?? null;
+  const found = registryStore.get(recordId.trim());
+  return found ? cloneAndFreezeRecord(found) : null;
 }
 
-/** Registers or updates an authorization record in the trusted store. */
+/** Registers or updates an authorization record in the trusted store with strict schema validation. */
 export function registerTrustedAuthRecord(record: TrustedAuthRecord): void {
-  registryStore.set(record.recordId, record);
+  const validated = validateTrustedAuthRecord(record);
+  registryStore.set(validated.recordId, cloneAndFreezeRecord(validated));
+}
+
+/** Revokes an authorization record by changing its status to BLOCKED or EXPIRED with audit trail. */
+export function revokeTrustedAuthRecord(
+  recordId: string,
+  revocation: {
+    status: "BLOCKED" | "EXPIRED";
+    reason: string;
+    revokedBy: string;
+    revokedAt?: string;
+  },
+): TrustedAuthRecord {
+  const existing = registryStore.get(recordId.trim());
+  if (!existing) {
+    throw new Error(`Cannot revoke record '${recordId}': record not found in trusted registry.`);
+  }
+  const updated: TrustedAuthRecord = {
+    ...existing,
+    status: revocation.status,
+    approvalProvenance: {
+      approvedBy: revocation.revokedBy,
+      reviewedAt: revocation.revokedAt ?? new Date().toISOString(),
+      notes: `REVOKED (${revocation.status}): ${revocation.reason}. Prior notes: ${existing.approvalProvenance.notes}`,
+    },
+  };
+  const validated = validateTrustedAuthRecord(updated);
+  const frozen = cloneAndFreezeRecord(validated);
+  registryStore.set(recordId.trim(), frozen);
+  return frozen;
 }
 
 /** Resets the trusted registry to defaults (for test isolation). */
@@ -194,9 +414,9 @@ export function resetTrustedRegistry(): void {
   initRegistry();
 }
 
-/** Returns all currently registered trusted authorization records. */
+/** Returns all currently registered trusted authorization records as immutable frozen clones. */
 export function listTrustedRecords(): TrustedAuthRecord[] {
-  return Array.from(registryStore.values());
+  return Array.from(registryStore.values()).map(cloneAndFreezeRecord);
 }
 
 /** Validates temporal validity of an authorization record. */
@@ -239,54 +459,69 @@ export function isRecordDateValid(
   return { valid: true };
 }
 
-/** Validates scope coverage of an authorization record. */
-export function isRecordScopeValid(
+/** Validates scope and purpose coverage of an authorization record. */
+export function isRecordOperationValid(
   record: TrustedAuthRecord,
-  requiredScope?: SourceUsageScope,
+  operation?: { purpose?: SourceUsagePurpose; scope?: SourceUsageScope },
 ): { valid: boolean; reason?: string } {
-  if (!requiredScope) {
+  if (!operation) {
     return { valid: true };
   }
-  if (!record.scopes.includes(requiredScope)) {
+  if (operation.purpose && !record.authorizedPurposes.includes(operation.purpose)) {
     return {
       valid: false,
-      reason: `Authorization record '${record.recordId}' does not cover required scope '${requiredScope}' (authorized: [${record.scopes.join(", ")}]).`,
+      reason: `Authorization record '${record.recordId}' does not authorize purpose '${operation.purpose}' (authorized: [${record.authorizedPurposes.join(", ")}]).`,
+    };
+  }
+  if (operation.scope && !record.scopes.includes(operation.scope)) {
+    return {
+      valid: false,
+      reason: `Authorization record '${record.recordId}' does not cover required scope '${operation.scope}' (authorized: [${record.scopes.join(", ")}]).`,
     };
   }
   return { valid: true };
 }
 
-export type SourcePolicyOptions = {
-  now?: Date;
-  requiredScope?: SourceUsageScope;
-};
-
 /**
  * Resolves the authoritative source authorization policy.
  *
- * Fail-Closed Invariants:
- * 1. A source is enabled if and only if:
- *    - The source feature flag is on.
+ * Operation-Specific Fail-Closed Invariants:
+ * 1. An operation is enabled if and only if:
+ *    - Explicit purpose and scope are provided in the operation request.
+ *    - The source feature flag is on (when applicable).
  *    - The record ID is present, non-placeholder, and recognized in the trusted registry.
  *    - The record source matches the requested source.
  *    - The record status is explicitly APPROVED.
  *    - The current time is within [effectiveDate, expirationDate].
- *    - The required usage scope is authorized by the record.
- * 2. In any other case, access is denied (status is PENDING, BLOCKED, or EXPIRED; enabled is false).
- * 3. Software gates enforce technical restriction; human operators remain responsible for legal contracts.
+ *    - The requested purpose is included in record.authorizedPurposes.
+ *    - The requested scope is included in record.scopes.
+ * 2. If purpose or scope is omitted (a display/status query):
+ *    - enabled is ALWAYS false (cannot authorize data access or execution without specific operation).
+ *    - status returns the record's current state for UI rendering.
+ * 3. In any other case, access is denied (status is PENDING, BLOCKED, or EXPIRED; enabled is false).
+ * 4. Software gates enforce technical restriction; human operators remain responsible for legal contracts.
  */
 export function getSourcePolicy(
-  sourceId: SourceId,
+  target: SourceId | SourceOperationRequest,
   options: SourcePolicyOptions = {},
 ): SourcePolicy {
-  const now = options.now ?? new Date();
-  const requiredScope = options.requiredScope;
+  const isOperationRequest = typeof target === "object" && target !== null && "purpose" in target && "scope" in target;
+  const sourceId: SourceId = typeof target === "string" ? target : target.sourceId;
+  const now = (isOperationRequest ? target.now : options.now) ?? options.now ?? new Date();
+  const requestedPurpose: SourceUsagePurpose | undefined = isOperationRequest
+    ? target.purpose
+    : options.purpose;
+  const requestedScope: SourceUsageScope | undefined = isOperationRequest
+    ? target.scope
+    : options.scope;
+  const authRecordIdOverride = (isOperationRequest ? target.authRecordIdOverride : options.authRecordIdOverride) ?? options.authRecordIdOverride;
+
   const cfg = config();
 
   // Route alias: google_serp evaluates the active AnyAPI scraped SERP route
   if (sourceId === "google_serp" || sourceId === "google_scraped_serp") {
     const isFlagOn = cfg.GOOGLE_SERP_SOURCE_ENABLED ?? false;
-    const rawRecordId = cfg.GOOGLE_SERP_AUTH_RECORD_ID?.trim() ?? null;
+    const rawRecordId = authRecordIdOverride ?? cfg.GOOGLE_SERP_AUTH_RECORD_ID?.trim() ?? null;
     const recordId = rawRecordId ?? "REC-GOOGLE-ANYAPI-SCRAPED";
 
     if (!isFlagOn) {
@@ -297,6 +532,10 @@ export function getSourcePolicy(
         enabled: false,
         authRecordId: rawRecordId,
         commercialUsePermitted: false,
+        authorizedPurposes: [],
+        authorizedScopes: [],
+        requestedPurpose,
+        requestedScope,
         reason:
           "AnyAPI scraped Google search is disabled by configuration (GOOGLE_SERP_SOURCE_ENABLED=false). Automated SERP scraping without an official Google agreement is prohibited.",
         legalDisclaimer: "Technical gate enforced: Scraped Google SERP calls and caching are disabled.",
@@ -311,6 +550,10 @@ export function getSourcePolicy(
         enabled: false,
         authRecordId: rawRecordId,
         commercialUsePermitted: false,
+        authorizedPurposes: [],
+        authorizedScopes: [],
+        requestedPurpose,
+        requestedScope,
         reason:
           "GOOGLE_SERP_SOURCE_ENABLED is set, but GOOGLE_SERP_AUTH_RECORD_ID is missing or a placeholder. An environment variable alone cannot grant approval; an explicit, recognized record in the trusted authorization registry is required.",
         legalDisclaimer: "Technical gate enforced: Missing or placeholder authorization record reference fails closed.",
@@ -326,6 +569,10 @@ export function getSourcePolicy(
         enabled: false,
         authRecordId: rawRecordId,
         commercialUsePermitted: false,
+        authorizedPurposes: [],
+        authorizedScopes: [],
+        requestedPurpose,
+        requestedScope,
         reason: `Authorization record '${rawRecordId}' is not recognized in the trusted registry. Arbitrary or fabricated identifiers fail closed.`,
         legalDisclaimer: "Technical gate enforced: Unrecognized authorization record fails closed.",
       };
@@ -339,6 +586,10 @@ export function getSourcePolicy(
         enabled: false,
         authRecordId: rawRecordId,
         commercialUsePermitted: false,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
         reason: `Authorization record '${rawRecordId}' is registered for source '${record.sourceId}', not 'google_scraped_serp'. Cross-source authorization attempts fail closed.`,
         legalDisclaimer: "Technical gate enforced: Mismatched source record fails closed.",
       };
@@ -352,6 +603,10 @@ export function getSourcePolicy(
         enabled: false,
         authRecordId: rawRecordId,
         commercialUsePermitted: false,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
         reason: `Authorization record '${rawRecordId}' has status '${record.status}'. Scraped SERP requires explicit commercial approval. Notes: ${record.approvalProvenance.notes}`,
         legalDisclaimer: `Technical gate enforced: Record status is ${record.status}.`,
         record,
@@ -363,18 +618,38 @@ export function getSourcePolicy(
       return {
         sourceId: "google_scraped_serp",
         name: record.name,
-        status: dateCheck.status ?? "BLOCKED",
+        status: dateCheck.status!,
         enabled: false,
         authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: dateCheck.reason ?? "Record date invalid.",
-        legalDisclaimer: "Technical gate enforced: Temporal validity check failed.",
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: dateCheck.reason!,
+        legalDisclaimer: `Technical gate enforced: Record temporal check evaluated to ${dateCheck.status}.`,
         record,
       };
     }
 
-    const scopeCheck = isRecordScopeValid(record, requiredScope);
-    if (!scopeCheck.valid) {
+    if (!requestedPurpose || !requestedScope) {
+      return {
+        sourceId: "google_scraped_serp",
+        name: record.name,
+        status: "APPROVED",
+        enabled: false,
+        authRecordId: recordId,
+        commercialUsePermitted: true,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        reason: "Policy status display query. Access execution requires explicit operation purpose and scope.",
+        legalDisclaimer: "Technical gate enforced: Access execution denied without explicit purpose and scope.",
+        record,
+      };
+    }
+
+    const opCheck = isRecordOperationValid(record, { purpose: requestedPurpose, scope: requestedScope });
+    if (!opCheck.valid) {
       return {
         sourceId: "google_scraped_serp",
         name: record.name,
@@ -382,8 +657,12 @@ export function getSourcePolicy(
         enabled: false,
         authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: scopeCheck.reason ?? "Record scope invalid.",
-        legalDisclaimer: "Technical gate enforced: Scope check failed.",
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: opCheck.reason!,
+        legalDisclaimer: "Technical gate enforced: Operation outside authorized purpose or scope fails closed.",
         record,
       };
     }
@@ -393,10 +672,14 @@ export function getSourcePolicy(
       name: record.name,
       status: "APPROVED",
       enabled: true,
-      authRecordId: rawRecordId,
+      authRecordId: recordId,
       commercialUsePermitted: true,
-      reason: `Operator enabled with verified, approved authorization record: ${rawRecordId}. Approved by: ${record.approvalProvenance.approvedBy}.`,
-      legalDisclaimer: `Software verified technical registry status and record reference '${rawRecordId}'. Operator is responsible for external legal validity.`,
+      authorizedPurposes: record.authorizedPurposes,
+      authorizedScopes: record.scopes,
+      requestedPurpose,
+      requestedScope,
+      reason: `Operator enabled with verified, approved authorization record: ${recordId}. Approved by: ${record.approvalProvenance.approvedBy}.`,
+      legalDisclaimer: `Software verified technical registry status and record reference '${recordId}'. Software cannot verify external legal sufficiency; operator is responsible for legal contract validity.`,
       record,
     };
   }
@@ -410,17 +693,22 @@ export function getSourcePolicy(
       enabled: false,
       authRecordId: "REC-GOOGLE-OFFICIAL-CSE",
       commercialUsePermitted: false,
+      authorizedPurposes: record ? record.authorizedPurposes : [],
+      authorizedScopes: record ? record.scopes : [],
+      requestedPurpose,
+      requestedScope,
       reason:
-        "Official Google Custom Search JSON API is not configured in this environment. Direct Google Cloud commercial API key and Search Engine ID are required.",
+        "Official Google Custom Search JSON API credentials (API key and CSE ID) are not provisioned in deployment.",
       legalDisclaimer:
-        "Technical gate enforced: Official Google API route requires configured credentials and executed Google Cloud agreement.",
+        "Official Google API access requires commercial billing and verified API credentials.",
       record,
     };
   }
 
   if (sourceId === "reddit") {
-    const isFlagOn = cfg.REDDIT_SOURCE_ENABLED ?? false;
-    const recordId = cfg.REDDIT_AUTH_RECORD_ID?.trim() ?? null;
+    const isFlagOn = cfg.REDDIT_SOURCE_ENABLED;
+    const rawRecordId = authRecordIdOverride ?? cfg.REDDIT_AUTH_RECORD_ID?.trim() ?? null;
+    const recordId = rawRecordId ?? "REC-REDDIT-COMMERCIAL-UNVERIFIED";
 
     if (!isFlagOn) {
       return {
@@ -428,23 +716,31 @@ export function getSourcePolicy(
         name: "Reddit (via AnyAPI Gateway)",
         status: "BLOCKED",
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
+        authorizedPurposes: [],
+        authorizedScopes: [],
+        requestedPurpose,
+        requestedScope,
         reason:
-          "Commercial Reddit data access is disabled by configuration (REDDIT_SOURCE_ENABLED=false). No verified commercial agreement has been authorized.",
+          "Reddit data source is disabled by configuration (REDDIT_SOURCE_ENABLED=false). Commercial redistribution and model extraction require an executed agreement with Reddit Inc.",
         legalDisclaimer:
-          "Technical gate enforced: Reddit data access, caching reuse, and serving are disabled.",
+          "Technical gate enforced: Ingestion, cache reuse, and downstream serving are disabled.",
       };
     }
 
-    if (!recordId || PLACEHOLDER_RECORD_IDS.has(recordId.toLowerCase())) {
+    if (!rawRecordId || PLACEHOLDER_RECORD_IDS.has(rawRecordId.toLowerCase())) {
       return {
         sourceId: "reddit",
         name: "Reddit (via AnyAPI Gateway)",
         status: "BLOCKED",
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
+        authorizedPurposes: [],
+        authorizedScopes: [],
+        requestedPurpose,
+        requestedScope,
         reason:
           "REDDIT_SOURCE_ENABLED is set, but REDDIT_AUTH_RECORD_ID is missing or a placeholder. An environment variable alone cannot grant approval; an explicit, recognized record in the trusted authorization registry is required.",
         legalDisclaimer:
@@ -459,9 +755,13 @@ export function getSourcePolicy(
         name: "Reddit (via AnyAPI Gateway)",
         status: "BLOCKED",
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: `Authorization record '${recordId}' is not recognized in the trusted registry. Arbitrary or fabricated identifiers fail closed.`,
+        authorizedPurposes: [],
+        authorizedScopes: [],
+        requestedPurpose,
+        requestedScope,
+        reason: `Authorization record '${rawRecordId}' is not recognized in the trusted registry. Arbitrary or fabricated identifiers fail closed.`,
         legalDisclaimer: "Technical gate enforced: Unrecognized authorization record fails closed.",
       };
     }
@@ -472,9 +772,13 @@ export function getSourcePolicy(
         name: "Reddit (via AnyAPI Gateway)",
         status: "BLOCKED",
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: `Authorization record '${recordId}' is registered for source '${record.sourceId}', not 'reddit'. Cross-source authorization attempts fail closed.`,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: `Authorization record '${rawRecordId}' is registered for source '${record.sourceId}', not 'reddit'. Cross-source authorization attempts fail closed.`,
         legalDisclaimer: "Technical gate enforced: Mismatched source record fails closed.",
       };
     }
@@ -485,9 +789,13 @@ export function getSourcePolicy(
         name: record.name,
         status: record.status,
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: `Authorization record '${recordId}' has status '${record.status}'. Commercial access requires status 'APPROVED'. Notes: ${record.approvalProvenance.notes}`,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: `Authorization record '${rawRecordId}' has status '${record.status}'. Commercial ingestion requires explicit approval. Notes: ${record.approvalProvenance.notes}`,
         legalDisclaimer: `Technical gate enforced: Record status is ${record.status}.`,
         record,
       };
@@ -498,27 +806,51 @@ export function getSourcePolicy(
       return {
         sourceId: "reddit",
         name: record.name,
-        status: dateCheck.status ?? "BLOCKED",
+        status: dateCheck.status!,
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: dateCheck.reason ?? "Record date invalid.",
-        legalDisclaimer: "Technical gate enforced: Temporal validity check failed.",
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: dateCheck.reason!,
+        legalDisclaimer: `Technical gate enforced: Record temporal check evaluated to ${dateCheck.status}.`,
         record,
       };
     }
 
-    const scopeCheck = isRecordScopeValid(record, requiredScope);
-    if (!scopeCheck.valid) {
+    if (!requestedPurpose || !requestedScope) {
+      return {
+        sourceId: "reddit",
+        name: record.name,
+        status: "APPROVED",
+        enabled: false,
+        authRecordId: recordId,
+        commercialUsePermitted: true,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        reason: "Policy status display query. Access execution requires explicit operation purpose and scope.",
+        legalDisclaimer: "Technical gate enforced: Access execution denied without explicit purpose and scope.",
+        record,
+      };
+    }
+
+    const opCheck = isRecordOperationValid(record, { purpose: requestedPurpose, scope: requestedScope });
+    if (!opCheck.valid) {
       return {
         sourceId: "reddit",
         name: record.name,
         status: "BLOCKED",
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: scopeCheck.reason ?? "Record scope invalid.",
-        legalDisclaimer: "Technical gate enforced: Scope check failed.",
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: opCheck.reason!,
+        legalDisclaimer: "Technical gate enforced: Operation outside authorized purpose or scope fails closed.",
         record,
       };
     }
@@ -530,6 +862,10 @@ export function getSourcePolicy(
       enabled: true,
       authRecordId: recordId,
       commercialUsePermitted: true,
+      authorizedPurposes: record.authorizedPurposes,
+      authorizedScopes: record.scopes,
+      requestedPurpose,
+      requestedScope,
       reason: `Operator enabled with verified, approved authorization record: ${recordId}. Approved by: ${record.approvalProvenance.approvedBy}.`,
       legalDisclaimer: `Software verified technical registry status and record reference '${recordId}'. Software cannot verify external legal sufficiency; operator is responsible for legal contract validity.`,
       record,
@@ -537,8 +873,9 @@ export function getSourcePolicy(
   }
 
   if (sourceId === "x") {
-    const isFlagOn = cfg.X_LEADS ?? false;
-    const recordId = cfg.X_AUTH_RECORD_ID?.trim() ?? null;
+    const isFlagOn = cfg.X_LEADS;
+    const rawRecordId = authRecordIdOverride ?? cfg.X_AUTH_RECORD_ID?.trim() ?? null;
+    const recordId = rawRecordId ?? "REC-X-PILOT-REVIEW";
 
     if (!isFlagOn) {
       return {
@@ -546,25 +883,36 @@ export function getSourcePolicy(
         name: "X / Twitter (via AnyAPI Gateway)",
         status: "BLOCKED",
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: "X leads feature is disabled by configuration (X_LEADS=false).",
-        legalDisclaimer: "Technical gate enforced: X data collection and serving are disabled.",
+        authorizedPurposes: [],
+        authorizedScopes: [],
+        requestedPurpose,
+        requestedScope,
+        reason:
+          "X leads feature is dark by configuration (X_LEADS=false). Feature flag must be enabled by operator alongside verified authorization.",
+        legalDisclaimer: "Technical gate enforced: X ingestion and serving are dark.",
       };
     }
 
-    if (!recordId || PLACEHOLDER_RECORD_IDS.has(recordId.toLowerCase())) {
+    if (!rawRecordId || PLACEHOLDER_RECORD_IDS.has(rawRecordId.toLowerCase())) {
+      const defaultRecord = getTrustedRecord("REC-X-PILOT-REVIEW");
       return {
         sourceId: "x",
         name: "X / Twitter (via AnyAPI Gateway)",
-        status: "PENDING",
+        status: defaultRecord ? defaultRecord.status : "PENDING",
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: null,
         commercialUsePermitted: false,
+        authorizedPurposes: defaultRecord ? defaultRecord.authorizedPurposes : [],
+        authorizedScopes: defaultRecord ? defaultRecord.scopes : [],
+        requestedPurpose,
+        requestedScope,
         reason:
-          "X leads feature is enabled, but X_AUTH_RECORD_ID is missing or pending review. Access to paid calls, cache reuse, and X-derived data is disabled while PENDING.",
+          "X_LEADS is enabled, but X_AUTH_RECORD_ID is not configured with an approved record. Current status is PENDING pilot review; commercial serving and paid API calls are blocked.",
         legalDisclaimer:
-          "Technical gate enforced: Pending authorization denies access to paid calls and data serving.",
+          "Technical gate enforced: Missing or unconfigured X authorization record reference fails closed as PENDING/BLOCKED.",
+        record: defaultRecord,
       };
     }
 
@@ -575,9 +923,13 @@ export function getSourcePolicy(
         name: "X / Twitter (via AnyAPI Gateway)",
         status: "BLOCKED",
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: `Authorization record '${recordId}' is not recognized in the trusted registry. Arbitrary or fabricated identifiers fail closed.`,
+        authorizedPurposes: [],
+        authorizedScopes: [],
+        requestedPurpose,
+        requestedScope,
+        reason: `Authorization record '${rawRecordId}' is not recognized in the trusted registry. Arbitrary or fabricated identifiers fail closed.`,
         legalDisclaimer: "Technical gate enforced: Unrecognized authorization record fails closed.",
       };
     }
@@ -588,9 +940,13 @@ export function getSourcePolicy(
         name: "X / Twitter (via AnyAPI Gateway)",
         status: "BLOCKED",
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: `Authorization record '${recordId}' is registered for source '${record.sourceId}', not 'x'. Cross-source authorization attempts fail closed.`,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: `Authorization record '${rawRecordId}' is registered for source '${record.sourceId}', not 'x'. Cross-source authorization attempts fail closed.`,
         legalDisclaimer: "Technical gate enforced: Mismatched source record fails closed.",
       };
     }
@@ -601,9 +957,13 @@ export function getSourcePolicy(
         name: record.name,
         status: record.status,
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: `Authorization record '${recordId}' has status '${record.status}'. Access is denied while not APPROVED. Notes: ${record.approvalProvenance.notes}`,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: `X authorization record '${rawRecordId}' has status '${record.status}'. Commercial ingestion requires explicit approval. Notes: ${record.approvalProvenance.notes}`,
         legalDisclaimer: `Technical gate enforced: Record status is ${record.status}.`,
         record,
       };
@@ -614,27 +974,51 @@ export function getSourcePolicy(
       return {
         sourceId: "x",
         name: record.name,
-        status: dateCheck.status ?? "BLOCKED",
+        status: dateCheck.status!,
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: dateCheck.reason ?? "Record date invalid.",
-        legalDisclaimer: "Technical gate enforced: Temporal validity check failed.",
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: dateCheck.reason!,
+        legalDisclaimer: `Technical gate enforced: Record temporal check evaluated to ${dateCheck.status}.`,
         record,
       };
     }
 
-    const scopeCheck = isRecordScopeValid(record, requiredScope);
-    if (!scopeCheck.valid) {
+    if (!requestedPurpose || !requestedScope) {
+      return {
+        sourceId: "x",
+        name: record.name,
+        status: "APPROVED",
+        enabled: false,
+        authRecordId: recordId,
+        commercialUsePermitted: true,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        reason: "Policy status display query. Access execution requires explicit operation purpose and scope.",
+        legalDisclaimer: "Technical gate enforced: Access execution denied without explicit purpose and scope.",
+        record,
+      };
+    }
+
+    const opCheck = isRecordOperationValid(record, { purpose: requestedPurpose, scope: requestedScope });
+    if (!opCheck.valid) {
       return {
         sourceId: "x",
         name: record.name,
         status: "BLOCKED",
         enabled: false,
-        authRecordId: recordId,
+        authRecordId: rawRecordId,
         commercialUsePermitted: false,
-        reason: scopeCheck.reason ?? "Record scope invalid.",
-        legalDisclaimer: "Technical gate enforced: Scope check failed.",
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: opCheck.reason!,
+        legalDisclaimer: "Technical gate enforced: Operation outside authorized purpose or scope fails closed.",
         record,
       };
     }
@@ -646,6 +1030,10 @@ export function getSourcePolicy(
       enabled: true,
       authRecordId: recordId,
       commercialUsePermitted: true,
+      authorizedPurposes: record.authorizedPurposes,
+      authorizedScopes: record.scopes,
+      requestedPurpose,
+      requestedScope,
       reason: `Operator enabled with verified, approved authorization record: ${recordId}. Approved by: ${record.approvalProvenance.approvedBy}.`,
       legalDisclaimer: `Software verified technical registry status and record reference '${recordId}'. Software cannot verify external legal sufficiency; operator is responsible for legal contract validity.`,
       record,
@@ -653,14 +1041,126 @@ export function getSourcePolicy(
   }
 
   if (sourceId === "website_crawler") {
-    const record = getTrustedRecord("REC-WEBSITE-CRAWLER-FIRST-PARTY");
+    const rawRecordId = authRecordIdOverride ?? "REC-WEBSITE-CRAWLER-FIRST-PARTY";
+    const record = getTrustedRecord(rawRecordId);
+
+    if (!record) {
+      return {
+        sourceId: "website_crawler",
+        name: "Target Website Web Crawler",
+        status: "BLOCKED",
+        enabled: false,
+        authRecordId: rawRecordId,
+        commercialUsePermitted: false,
+        authorizedPurposes: [],
+        authorizedScopes: [],
+        requestedPurpose,
+        requestedScope,
+        reason: `Crawler authorization record '${rawRecordId}' is not recognized in the trusted registry. Access fails closed.`,
+        legalDisclaimer: "Technical gate enforced: Missing crawler authorization record fails closed.",
+      };
+    }
+
+    if (record.sourceId !== "website_crawler") {
+      return {
+        sourceId: "website_crawler",
+        name: "Target Website Web Crawler",
+        status: "BLOCKED",
+        enabled: false,
+        authRecordId: rawRecordId,
+        commercialUsePermitted: false,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: `Authorization record '${rawRecordId}' belongs to source '${record.sourceId}', not 'website_crawler'. Cross-source authorization attempts fail closed.`,
+        legalDisclaimer: "Technical gate enforced: Mismatched crawler record fails closed.",
+      };
+    }
+
+    if (record.status !== "APPROVED") {
+      return {
+        sourceId: "website_crawler",
+        name: record.name,
+        status: record.status,
+        enabled: false,
+        authRecordId: rawRecordId,
+        commercialUsePermitted: false,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: `Crawler authorization record '${rawRecordId}' has status '${record.status}'. Crawling requires an APPROVED record. Notes: ${record.approvalProvenance.notes}`,
+        legalDisclaimer: `Technical gate enforced: Crawler record status is ${record.status}.`,
+        record,
+      };
+    }
+
+    const dateCheck = isRecordDateValid(record, now);
+    if (!dateCheck.valid) {
+      return {
+        sourceId: "website_crawler",
+        name: record.name,
+        status: dateCheck.status!,
+        enabled: false,
+        authRecordId: rawRecordId,
+        commercialUsePermitted: false,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: dateCheck.reason!,
+        legalDisclaimer: `Technical gate enforced: Crawler record temporal check evaluated to ${dateCheck.status}.`,
+        record,
+      };
+    }
+
+    if (!requestedPurpose || !requestedScope) {
+      return {
+        sourceId: "website_crawler",
+        name: record.name,
+        status: "APPROVED",
+        enabled: false,
+        authRecordId: rawRecordId,
+        commercialUsePermitted: true,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        reason: "Policy status display query. Access execution requires explicit operation purpose and scope.",
+        legalDisclaimer: "Technical gate enforced: Crawler execution denied without explicit purpose and scope.",
+        record,
+      };
+    }
+
+    const opCheck = isRecordOperationValid(record, { purpose: requestedPurpose, scope: requestedScope });
+    if (!opCheck.valid) {
+      return {
+        sourceId: "website_crawler",
+        name: record.name,
+        status: "BLOCKED",
+        enabled: false,
+        authRecordId: rawRecordId,
+        commercialUsePermitted: false,
+        authorizedPurposes: record.authorizedPurposes,
+        authorizedScopes: record.scopes,
+        requestedPurpose,
+        requestedScope,
+        reason: opCheck.reason!,
+        legalDisclaimer: "Technical gate enforced: Crawler operation outside authorized purpose or scope fails closed.",
+        record,
+      };
+    }
+
     return {
       sourceId: "website_crawler",
-      name: "Target Website Web Crawler",
+      name: record.name,
       status: "APPROVED",
       enabled: true,
-      authRecordId: "REC-WEBSITE-CRAWLER-FIRST-PARTY",
+      authRecordId: rawRecordId,
       commercialUsePermitted: true,
+      authorizedPurposes: record.authorizedPurposes,
+      authorizedScopes: record.scopes,
+      requestedPurpose,
+      requestedScope,
       reason:
         "First-party website audit initiated by authenticated project owner for their own configured website domain.",
       legalDisclaimer:
@@ -676,24 +1176,33 @@ export function getSourcePolicy(
     enabled: false,
     authRecordId: null,
     commercialUsePermitted: false,
+    authorizedPurposes: [],
+    authorizedScopes: [],
+    requestedPurpose,
+    requestedScope,
     reason: `Source '${sourceId}' is unclassified. Access fails closed by default.`,
     legalDisclaimer: "Technical gate enforced: Unclassified source fails closed.",
   };
 }
 
+export function isSourceAuthorized(request: SourceOperationRequest): boolean;
+export function isSourceAuthorized(sourceId: SourceId, options?: SourcePolicyOptions): boolean;
 export function isSourceAuthorized(
-  sourceId: SourceId,
-  options?: SourcePolicyOptions,
+  target: SourceId | SourceOperationRequest,
+  options: SourcePolicyOptions = {},
 ): boolean {
-  return getSourcePolicy(sourceId, options).enabled;
+  return getSourcePolicy(target, options).enabled;
 }
 
+export function assertSourceAuthorized(request: SourceOperationRequest): void;
+export function assertSourceAuthorized(sourceId: SourceId, options?: SourcePolicyOptions): void;
 export function assertSourceAuthorized(
-  sourceId: SourceId,
-  options?: SourcePolicyOptions,
+  target: SourceId | SourceOperationRequest,
+  options: SourcePolicyOptions = {},
 ): void {
-  const policy = getSourcePolicy(sourceId, options);
+  const policy = getSourcePolicy(target, options);
   if (!policy.enabled) {
+    const sourceId = typeof target === "string" ? target : target.sourceId;
     throw new SourceUnauthorizedError(
       sourceId,
       policy.reason,

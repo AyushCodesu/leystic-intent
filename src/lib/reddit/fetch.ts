@@ -4,7 +4,13 @@ import { db } from "@/db";
 import { searchRuns, usageLedger } from "@/db/schema";
 import type { FundedClient, Funding } from "@/lib/anyapi";
 import { assertHouseDataUnderCap } from "@/lib/usage";
-import { assertSourceAuthorized, sourceForSku } from "@/lib/sourcePolicy";
+import {
+  assertSourceAuthorized,
+  sourceForSku,
+  type SourceOperationRequest,
+  type SourceUsagePurpose,
+  type SourceUsageScope,
+} from "@/lib/sourcePolicy";
 import { paced } from "./pace";
 /** One search_runs row per kind of thing we fetch, on Reddit or on Google. */
 export type FetchKind =
@@ -35,10 +41,53 @@ type SharedFetch<T> = {
   /** Every other effective parameter, canonicalized; see `searchRuns.variant`. */
   variant?: string;
   maxAgeMs?: number;
+  purpose?: SourceUsagePurpose;
+  scope?: SourceUsageScope;
   run: () => Promise<{ data: unknown; costUsd: number; nextCursor?: string | null }>;
   store: (data: unknown, runId: string) => Promise<T>;
   load: (runId: string) => Promise<T>;
 };
+
+export function operationForFetch(input: {
+  sku: string;
+  kind: FetchKind;
+  purpose?: SourceUsagePurpose;
+  scope?: SourceUsageScope;
+}): SourceOperationRequest {
+  const sourceId = sourceForSku(input.sku);
+  let defaultPurpose: SourceUsagePurpose;
+  let defaultScope: SourceUsageScope;
+
+  if (sourceId === "reddit") {
+    defaultPurpose = "commercial_lead_generation";
+    if (input.kind === "keyword" || input.kind === "subreddit_posts" || input.kind === "subreddit") {
+      defaultScope = "search_discovery";
+    } else if (input.kind === "comments") {
+      defaultScope = "comments_read";
+    } else {
+      defaultScope = "social_content_read";
+    }
+  } else if (sourceId === "x") {
+    defaultPurpose = "social_intent_monitoring";
+    if (input.kind === "x_search") {
+      defaultScope = "search_discovery";
+    } else {
+      defaultScope = "social_content_read";
+    }
+  } else if (sourceId === "google_scraped_serp") {
+    defaultPurpose = "seo_opportunity_discovery";
+    defaultScope = "search_discovery";
+  } else {
+    defaultPurpose = "commercial_lead_generation";
+    defaultScope = "search_discovery";
+  }
+
+  return {
+    sourceId,
+    purpose: input.purpose ?? defaultPurpose,
+    scope: input.scope ?? defaultScope,
+  };
+}
 
 export type SharedResult<T> = { value: T; reused: boolean; costUsd: number };
 
@@ -117,9 +166,9 @@ export async function recordUsage(input: {
  * makes it; Google has its own vendor and is not paced here.
  */
 export async function fetchShared<T>(input: SharedFetch<T>): Promise<SharedResult<T>> {
+  const operation = operationForFetch(input);
+  assertSourceAuthorized(operation);
   const { ctx, kind, sku, normalizedQuery } = input;
-  const sourceId = sourceForSku(sku);
-  assertSourceAuthorized(sourceId);
   const sort = input.sort ?? null;
   const timeframe = input.timeframe ?? null;
   const variant = input.variant ?? "";

@@ -719,3 +719,72 @@ Explicit Legal Boundary: Software gates enforce technical restrictions, isolate 
 * `npm run build`: Production build succeeded with Next.js Turbopack (35 static and dynamic routes compiled).
 * `git diff --check`: 0 whitespace errors.
 * Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all files.
+
+---
+
+## 17. Enforce Operation-Specific Source Authorization and Registry Revocation
+
+**Branch**: `fix/operation-specific-source-authorization-and-revocation`
+**Date**: October 2026
+
+### 1. Architectural Changes to Source Policy Model (`src/lib/sourcePolicy.ts`)
+* **Controlled Purpose and Scope Vocabularies**:
+  * Purposes (`SourceUsagePurpose`): `commercial_lead_generation`, `competitor_intelligence`, `seo_opportunity_discovery`, `social_intent_monitoring`, `customer_website_coverage`, `compliance_audit`.
+  * Scopes (`SourceUsageScope`): `search_discovery`, `social_content_read`, `comments_read`, `profile_metadata_read`, `customer_domain_crawl`, `commercial_indexing`, `social_intent_monitoring`, `read_only_audit`, `test_scope`.
+  * Arbitrary or unvetted strings are rejected by schema validators with `InvalidAuthRecordError`.
+* **Operation-Specific Request Model (`SourceOperationRequest`)**:
+  * Callers must provide `{ sourceId, purpose, scope }`.
+  * Policy evaluation (`getSourcePolicy`) validates that the record's `authorizedPurposes` includes the requested `purpose` and that `scopes` includes the requested `scope`.
+  * UI Display vs Access Execution: If purpose or scope is omitted, the call is evaluated strictly as a status/display query, returning `enabled: false` and the current `status` for rendering informative UI banners without granting access.
+* **Registry Integrity, Immutability & Programmatic Revocation**:
+  * `validateTrustedAuthRecord`: Strictly validates ID formats, non-empty names, valid status, non-empty purpose/scope arrays, ISO dates, `effectiveDate <= expirationDate`, evidence, and reviewer provenance.
+  * Defensive Store Immutability: Deep cloning and `Object.freeze` applied to registered records to prevent in-memory tampering.
+  * `revokeTrustedAuthRecord`: Supports programmatic revocation (`status: "BLOCKED" | "EXPIRED"`) with reviewer attribution and audit notes. Takes effect immediately for subsequent authorization checks.
+  * First-party website crawler parity: Removed hardcoded `APPROVED` bypass in `getSourcePolicy("website_crawler")`. It now evaluates `REC-WEBSITE-CRAWLER-FIRST-PARTY` against record status, temporal validity, purpose (`customer_website_coverage`), and scope (`customer_domain_crawl`).
+
+### 2. Seam Threading Across Ingestion and Serving Paths
+* `fetchShared` (`src/lib/reddit/fetch.ts`):
+  * Mapped all SKU and kind combinations to explicit operations via `operationForFetch`.
+  * Asserts source authorization before querying cache (`findRun`), before checking in-flight requests, and before issuing AnyAPI HTTP calls.
+* Customer Website Crawler (`src/lib/gaps/crawler.ts`):
+  * Asserts `{ sourceId: "website_crawler", purpose: "customer_website_coverage", scope: "customer_domain_crawl" }` before URL validation and crawling.
+* X Pipeline (`src/lib/x/read.ts`, `src/lib/x/run.ts`, `src/lib/alerts/leads.ts`):
+  * All 11 X read queries check `X_READ_OP` (`social_intent_monitoring`, `social_content_read`).
+  * `runXScan` checks `X_SCAN_OP` (`social_intent_monitoring`, `social_intent_monitoring`).
+  * `newXLeadsSince` checks `X_ALERT_OP` (`social_intent_monitoring`, `social_content_read`).
+* Reddit Downstream Consumers (`src/lib/leads.ts`, `src/lib/competitors/read.ts`, `src/lib/competitors/scan.ts`, `src/lib/seo/read.ts`, `src/lib/alerts/leads.ts`, `src/lib/api/handlers.ts`):
+  * Threaded typed operations for commercial lead generation, competitor intelligence, and SEO opportunity discovery.
+
+### 3. Truthful Retention Reporting and Operator Approval Controls (`src/lib/retention.ts`)
+* **Separation of Routine TTL Cleanup from Historical Purges**:
+  * Clarified and documented that routine TTL cleanup (`deleteExpiredPosts` past 30 days) runs automatically in bounded batches of 500 without operator approval, while preserving referenced records in `leads`, `seo_opportunities`, and `competitor_mentions`.
+  * Destructive historical and bulk purges are isolated in `purgeHistoricalData(options)` and require `options.operatorApprovalConfirmed === true`. Without this, the call throws `OperatorApprovalRequiredError`.
+* **Truthful Dry-Run Plan (`RetentionDryRunPlan`)**:
+  * `auditRetention()` and dry-run plans now accurately report:
+    * `routineTtlCleanup: { isAutomatic: true, windowDays: 30, batchSize: 500, preservesReferencedRows: true }`
+    * `historicalBulkPurge: { requiresOperatorApproval: true, approvalEnforcedInCode: true }`
+    * `destructivePurgeBlockedWithoutOperatorApproval: true`
+
+### 4. 12-Scenario Regression Test Suite (`tests/sourceAuthorizationGate.test.ts`)
+1. Record approved only for `read_only_audit` fails closed for `commercial_indexing`.
+2. Missing purpose or scope fails closed with `SourceUnauthorizedError`.
+3. Ingestion path (`fetchShared`) asserts operation-specific authorization before cache, in-flight, or network.
+4. X read queries and alerts fail closed when X is unauthorized.
+5. Website crawler requires valid first-party authorization and fails closed if unapproved or scope-mismatched.
+6. Execution paths distinguish execution denial from display queries.
+7. Registry validates records on registration, enforces immutability via `Object.freeze`, and revocation immediately updates decisions.
+8. Unknown SKUs fail closed with `SourceUnauthorizedError`.
+9. UI status displays remain useful without granting data execution access.
+10. Approved test records work only within their explicitly authorized scope and purpose.
+11. Retention dry-run accurately describes automatic TTL vs approval-gated historical purges (`OperatorApprovalRequiredError`).
+12. End-to-end Reddit and X reads remain protected without authorized records.
+
+### 5. Verification Results
+* `npm run typecheck`: 0 errors.
+* `npm run lint`: 0 problems (0 errors, 0 warnings).
+* `tests/sourceAuthorizationGate.test.ts`: 12 passed, 3 skipped (db offline).
+* `npm test`: 83 test files passed (803 passed, 281 skipped), 0 failures.
+* `npm run build`: Production build succeeded with Next.js Turbopack (35 static and dynamic routes compiled).
+* `git diff --check`: 0 whitespace errors.
+* Typography test (`tests/typography.test.ts`): Passed. No non-ASCII characters or em/en dashes.
+* External Legal Notice: Software gates enforce technical restrictions only; external contracts with data providers remain required.

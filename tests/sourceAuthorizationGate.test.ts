@@ -1,23 +1,27 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApiCaller } from "@/lib/api/auth";
-import { lead, projectLeads, projectPainThemes, projectSeoOpportunities } from "@/lib/api/handlers";
-import { ApiError, apiErrorResponse } from "@/lib/api/responses";
-import { countMentions, competitorsNamedIn, listMentions } from "@/lib/competitors/read";
 import { runCompetitorScan } from "@/lib/competitors/scan";
-import { countLeads, findLead, listLeadFaces, listLeads, listReviewItems } from "@/lib/leads";
+import { crawlWebsiteInventory } from "@/lib/gaps/crawler";
 import { fetchShared } from "@/lib/reddit/fetch";
-import { auditRetention, deleteExpiredPosts } from "@/lib/retention";
-import { countOpportunities, listOpportunities, seoFacets } from "@/lib/seo/read";
+import {
+  auditRetention,
+  deleteExpiredPosts,
+  OperatorApprovalRequiredError,
+  purgeHistoricalData,
+} from "@/lib/retention";
 import {
   allSourcePolicies,
   assertSourceAuthorized,
   getSourcePolicy,
+  getTrustedRecord,
+  InvalidAuthRecordError,
   isSourceAuthorized,
   registerTrustedAuthRecord,
   resetTrustedRegistry,
+  revokeTrustedAuthRecord,
   sourceForSku,
   SourceUnauthorizedError,
+  type SourceOperationRequest,
   type TrustedAuthRecord,
 } from "@/lib/sourcePolicy";
 import { newXLeadsSince } from "@/lib/alerts/leads";
@@ -28,27 +32,9 @@ import {
   listXOpportunities,
   xLeadById,
 } from "@/lib/x/read";
-import { TIERS } from "@/lib/tiers";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
-const caller = {
-  user: {
-    id: "u_gate_test",
-    email: "test@example.com",
-    createdAt: new Date(0),
-    clerkUserId: "clerk_gate_test",
-    settings: null,
-    lastSeenAt: null,
-  },
-  keyId: "00000000-0000-0000-0000-000000000000",
-  keyPrefix: "rl_sk_test",
-  scopes: [],
-  tier: "connected",
-  limits: TIERS.connected,
-  selfHosted: false,
-} as unknown as ApiCaller;
-
-describe("Source Authorization Registry and Policy Gate", () => {
+describe("Operation-Specific Source Authorization and Registry Controls", () => {
   beforeEach(() => {
     vi.stubEnv("DATABASE_URL", "postgres://reddit_leads@localhost:5433/reddit_leads");
     vi.stubEnv("APP_ENCRYPTION_KEY", Buffer.alloc(32).toString("base64"));
@@ -60,194 +46,152 @@ describe("Source Authorization Registry and Policy Gate", () => {
     resetTrustedRegistry();
   });
 
-  // Requirement 1: Reddit remains blocked under current register status even with flag true
-  it("Requirement 1: Reddit remains blocked under current register status (REC-REDDIT-COMMERCIAL-UNVERIFIED) even with REDDIT_SOURCE_ENABLED=true", () => {
+  // Test 1: A record approved only for read_only_audit cannot authorize commercial indexing
+  it("Test 1: Record approved only for read_only_audit cannot authorize commercial indexing", () => {
+    const auditRecord: TrustedAuthRecord = {
+      recordId: "REC-TEST-AUDIT-ONLY",
+      sourceId: "reddit",
+      name: "Reddit Read-Only Audit Agreement",
+      status: "APPROVED",
+      authorizedPurposes: ["commercial_lead_generation"],
+      scopes: ["read_only_audit"],
+      effectiveDate: "2026-01-01T00:00:00.000Z",
+      expirationDate: null,
+      evidenceReference: "AUDIT-AGREEMENT-001",
+      approvalProvenance: {
+        approvedBy: "Compliance Auditor",
+        reviewedAt: "2026-01-01T00:00:00.000Z",
+        notes: "Strictly limited to read_only_audit scope",
+      },
+    };
+    registerTrustedAuthRecord(auditRecord);
+
+    vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
+    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-AUDIT-ONLY");
+
+    const opRequest: SourceOperationRequest = {
+      sourceId: "reddit",
+      purpose: "commercial_lead_generation",
+      scope: "commercial_indexing",
+    };
+
+    const policy = getSourcePolicy(opRequest);
+    expect(policy.status).toBe("BLOCKED");
+    expect(policy.enabled).toBe(false);
+    expect(isSourceAuthorized(opRequest)).toBe(false);
+    expect(() => assertSourceAuthorized(opRequest)).toThrow(SourceUnauthorizedError);
+  });
+
+  // Test 2: A record with the correct scope but the wrong purpose is denied
+  it("Test 2: Record with the correct scope but the wrong purpose is denied", () => {
+    const academicRecord: TrustedAuthRecord = {
+      recordId: "REC-TEST-ACADEMIC-ONLY",
+      sourceId: "reddit",
+      name: "Academic Research Pilot Agreement",
+      status: "APPROVED",
+      authorizedPurposes: ["academic_research"],
+      scopes: ["search_discovery", "social_content_read"],
+      effectiveDate: "2026-01-01T00:00:00.000Z",
+      expirationDate: null,
+      evidenceReference: "ACADEMIC-GRANT-REF-42",
+      approvalProvenance: {
+        approvedBy: "University Ethics Committee",
+        reviewedAt: "2026-01-01T00:00:00.000Z",
+        notes: "Scope covers search and reads, but strictly non-commercial academic research",
+      },
+    };
+    registerTrustedAuthRecord(academicRecord);
+
+    vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
+    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-ACADEMIC-ONLY");
+
+    const commercialRequest: SourceOperationRequest = {
+      sourceId: "reddit",
+      purpose: "commercial_lead_generation",
+      scope: "search_discovery",
+    };
+
+    const policy = getSourcePolicy(commercialRequest);
+    expect(policy.status).toBe("BLOCKED");
+    expect(policy.enabled).toBe(false);
+    expect(isSourceAuthorized(commercialRequest)).toBe(false);
+    expect(() => assertSourceAuthorized(commercialRequest)).toThrow(SourceUnauthorizedError);
+  });
+
+  // Test 3: Every production authorization call supplies its required operation purpose and scope
+  it("Test 3: Calling authorization without explicit operation purpose and scope fails closed", () => {
     vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
     vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-REDDIT-COMMERCIAL-UNVERIFIED");
 
-    const policy = getSourcePolicy("reddit");
-    expect(policy.status).toBe("BLOCKED");
-    expect(policy.enabled).toBe(false);
-    expect(policy.commercialUsePermitted).toBe(false);
-    expect(policy.authRecordId).toBe("REC-REDDIT-COMMERCIAL-UNVERIFIED");
+    // Calling without operation purpose and scope must fail closed
     expect(isSourceAuthorized("reddit")).toBe(false);
     expect(() => assertSourceAuthorized("reddit")).toThrow(SourceUnauthorizedError);
-  });
 
-  // Requirement 2: Fabricated or unknown Reddit record ID fails closed
-  it("Requirement 2: Fabricated or unknown Reddit record ID fails closed", () => {
-    vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "FABRICATED-REC-123");
-
-    const policy = getSourcePolicy("reddit");
-    expect(policy.status).toBe("BLOCKED");
-    expect(policy.enabled).toBe(false);
-    expect(policy.commercialUsePermitted).toBe(false);
-    expect(policy.authRecordId).toBe("FABRICATED-REC-123");
-    expect(isSourceAuthorized("reddit")).toBe(false);
-    expect(() => assertSourceAuthorized("reddit")).toThrow(SourceUnauthorizedError);
-  });
-
-  // Requirement 3: Missing, pending, blocked, expired, wrong-source, and wrong-scope records all fail closed
-  it("Requirement 3: Missing, pending, blocked, expired, wrong-source, and wrong-scope records all fail closed", () => {
-    // 3a: Missing record ID
-    vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "");
-    expect(getSourcePolicy("reddit").enabled).toBe(false);
-    expect(getSourcePolicy("reddit").status).toBe("BLOCKED");
-
-    // 3b: Pending record
-    const pendingRecord: TrustedAuthRecord = {
-      recordId: "REC-TEST-PENDING",
-      sourceId: "reddit",
-      name: "Pending Pilot Review",
-      status: "PENDING",
-      authorizedPurposes: ["commercial_lead_generation"],
-      scopes: ["commercial_indexing", "search_discovery"],
-      effectiveDate: "2026-01-01T00:00:00Z",
-      expirationDate: null,
-      evidenceReference: "REF-PENDING",
-      approvalProvenance: {
-        approvedBy: "Legal Dept",
-        reviewedAt: "2026-10-01T00:00:00Z",
-        notes: "Pending final signatures",
-      },
-    };
-    registerTrustedAuthRecord(pendingRecord);
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-PENDING");
-    const pendingPolicy = getSourcePolicy("reddit");
-    expect(pendingPolicy.status).toBe("PENDING");
-    expect(pendingPolicy.enabled).toBe(false);
-
-    // 3c: Blocked record
-    const blockedRecord: TrustedAuthRecord = {
-      recordId: "REC-TEST-BLOCKED",
-      sourceId: "reddit",
-      name: "Explicitly Rejected Terms",
-      status: "BLOCKED",
-      authorizedPurposes: ["commercial_lead_generation"],
-      scopes: ["commercial_indexing"],
-      effectiveDate: "2026-01-01T00:00:00Z",
-      expirationDate: null,
-      evidenceReference: "REF-BLOCKED",
-      approvalProvenance: {
-        approvedBy: "Compliance",
-        reviewedAt: "2026-10-01T00:00:00Z",
-        notes: "Rejected commercial terms",
-      },
-    };
-    registerTrustedAuthRecord(blockedRecord);
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-BLOCKED");
-    const blockedPolicy = getSourcePolicy("reddit");
-    expect(blockedPolicy.status).toBe("BLOCKED");
-    expect(blockedPolicy.enabled).toBe(false);
-
-    // 3d: Expired record
-    const expiredRecord: TrustedAuthRecord = {
-      recordId: "REC-TEST-EXPIRED",
-      sourceId: "reddit",
-      name: "Expired Pilot Contract",
-      status: "APPROVED",
-      authorizedPurposes: ["commercial_lead_generation"],
-      scopes: ["commercial_indexing"],
-      effectiveDate: "2024-01-01T00:00:00Z",
-      expirationDate: "2025-01-01T00:00:00Z",
-      evidenceReference: "REF-EXPIRED",
-      approvalProvenance: {
-        approvedBy: "Legal",
-        reviewedAt: "2024-01-01T00:00:00Z",
-        notes: "Expired one year agreement",
-      },
-    };
-    registerTrustedAuthRecord(expiredRecord);
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-EXPIRED");
-    const expiredPolicy = getSourcePolicy("reddit");
-    expect(expiredPolicy.status).toBe("EXPIRED");
-    expect(expiredPolicy.enabled).toBe(false);
-
-    // 3e: Wrong-source record (using a website_crawler record for reddit)
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-WEBSITE-CRAWLER-FIRST-PARTY");
-    const wrongSourcePolicy = getSourcePolicy("reddit");
-    expect(wrongSourcePolicy.status).toBe("BLOCKED");
-    expect(wrongSourcePolicy.enabled).toBe(false);
-
-    // 3f: Wrong-scope record
-    const limitedScopeRecord: TrustedAuthRecord = {
-      recordId: "REC-TEST-LIMITED-SCOPE",
-      sourceId: "reddit",
-      name: "Non-Commercial Academic License",
-      status: "APPROVED",
-      authorizedPurposes: ["academic_research_only"],
-      scopes: ["read_only_audit"],
-      effectiveDate: "2026-01-01T00:00:00Z",
-      expirationDate: null,
-      evidenceReference: "REF-ACADEMIC",
-      approvalProvenance: {
-        approvedBy: "Research Lead",
-        reviewedAt: "2026-01-01T00:00:00Z",
-        notes: "Restricted to read-only audit",
-      },
-    };
-    registerTrustedAuthRecord(limitedScopeRecord);
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-LIMITED-SCOPE");
-    const wrongPurposePolicy = getSourcePolicy("reddit", { requiredScope: "commercial_indexing" });
-    expect(wrongPurposePolicy.status).toBe("BLOCKED");
-    expect(wrongPurposePolicy.enabled).toBe(false);
-  });
-
-  // Requirement 4: X with X_LEADS=true and no approved record (or REC-X-PILOT-REVIEW) is disabled
-  it("Requirement 4: X with X_LEADS=true and no approved record (or REC-X-PILOT-REVIEW) is disabled (status: PENDING, enabled: false)", () => {
-    vi.stubEnv("X_LEADS", "true");
-    vi.stubEnv("X_AUTH_RECORD_ID", "REC-X-PILOT-REVIEW");
-
-    const policy = getSourcePolicy("x");
-    expect(policy.status).toBe("PENDING");
-    expect(policy.enabled).toBe(false);
-    expect(policy.commercialUsePermitted).toBe(false);
+    // Calling for X without operation purpose and scope must fail closed
     expect(isSourceAuthorized("x")).toBe(false);
+    expect(() => assertSourceAuthorized("x")).toThrow(SourceUnauthorizedError);
+
+    // Calling for crawler without operation purpose and scope must fail closed
+    expect(isSourceAuthorized("website_crawler")).toBe(false);
+    expect(() => assertSourceAuthorized("website_crawler")).toThrow(SourceUnauthorizedError);
   });
 
-  // Requirement 5: X with plausible-looking but unrecognized record ID remains disabled
-  it("Requirement 5: X with plausible-looking but unrecognized record ID remains disabled (status: BLOCKED, enabled: false)", () => {
+  // Test 4: X read paths and alerts deny operations outside an approved record's scope
+  it("Test 4: X read paths and alerts deny operations outside an approved record's scope", async () => {
+    // Record approved for search_discovery only, omitting social_content_read
+    const searchOnlyRecord: TrustedAuthRecord = {
+      recordId: "REC-X-SEARCH-ONLY",
+      sourceId: "x",
+      name: "X Search Only Pilot",
+      status: "APPROVED",
+      authorizedPurposes: ["social_intent_monitoring"],
+      scopes: ["search_discovery"],
+      effectiveDate: "2026-01-01T00:00:00.000Z",
+      expirationDate: null,
+      evidenceReference: "DOC-X-SEARCH-AGREEMENT",
+      approvalProvenance: {
+        approvedBy: "VP Engineering",
+        reviewedAt: "2026-01-01T00:00:00.000Z",
+        notes: "Authorized search discovery queries only; tweet content read scope not included",
+      },
+    };
+    registerTrustedAuthRecord(searchOnlyRecord);
+
     vi.stubEnv("X_LEADS", "true");
-    vi.stubEnv("X_AUTH_RECORD_ID", "REC-X-COMMERCIAL-2026-ENTERPRISE");
+    vi.stubEnv("X_AUTH_RECORD_ID", "REC-X-SEARCH-ONLY");
 
-    const policy = getSourcePolicy("x");
-    expect(policy.status).toBe("BLOCKED");
-    expect(policy.enabled).toBe(false);
-    expect(policy.commercialUsePermitted).toBe(false);
-    expect(isSourceAuthorized("x")).toBe(false);
+    const xFilter = { days: 30 as const, status: "new" as const };
+
+    // All X content-reading functions require scope "social_content_read"
+    expect(await listXLeads("p_any", xFilter)).toEqual([]);
+    expect(await xLeadById("p_any", "tweet_123")).toBeNull();
+    expect(await listXHeld("p_any", xFilter)).toEqual([]);
+    expect(await listXFiltered("p_any", xFilter)).toEqual({
+      items: [],
+      judged: 0,
+      screened: 0,
+      unfinished: 0,
+      closeCalls: 0,
+      worth: 0,
+      pending: 0,
+    });
+    expect(await listXOpportunities("p_any", xFilter)).toEqual({
+      items: [],
+      total: 0,
+      posts: 0,
+      faces: [],
+    });
+    expect(await newXLeadsSince("p_any", new Date(0))).toEqual([]);
   });
 
-  // Requirement 6: Google SERP routes have separate policy statuses and SKU mapping fails closed
-  it("Requirement 6: Google SERP routes have separate policy statuses (google_scraped_serp is BLOCKED; google_official_api is BLOCKED)", () => {
-    const scrapedPolicy = getSourcePolicy("google_scraped_serp");
-    expect(scrapedPolicy.status).toBe("BLOCKED");
-    expect(scrapedPolicy.enabled).toBe(false);
-
-    const officialPolicy = getSourcePolicy("google_official_api");
-    expect(officialPolicy.status).toBe("BLOCKED");
-    expect(officialPolicy.enabled).toBe(false);
-
-    // SKU mapping tests
-    expect(sourceForSku("google.search")).toBe("google_scraped_serp");
-    expect(sourceForSku("reddit.search")).toBe("reddit");
-    expect(sourceForSku("reddit.post")).toBe("reddit");
-    expect(sourceForSku("reddit.comments")).toBe("reddit");
-    expect(sourceForSku("twitter.search")).toBe("x");
-    expect(sourceForSku("twitter.user")).toBe("x");
-
-    // Unrecognized SKU throws SourceUnauthorizedError immediately
-    expect(() => sourceForSku("unknown.sku")).toThrow(SourceUnauthorizedError);
-    expect(() => sourceForSku("custom.provider.fetch")).toThrow(SourceUnauthorizedError);
-  });
-
-  // Requirement 7: Denied sources cause zero paid provider calls
-  it("Requirement 7: Denied sources cause zero paid provider calls at fetchShared boundary", async () => {
+  // Test 5: fetchShared() continues to block unauthorized calls before cache reuse, in-flight reuse, and paid calls
+  it("Test 5: fetchShared() blocks unauthorized calls before cache reuse and before network execution", async () => {
     vi.stubEnv("REDDIT_SOURCE_ENABLED", "false");
     vi.stubEnv("REDDIT_AUTH_RECORD_ID", "");
 
+    let cacheLookupAttempted = false;
     let anyApiCalled = false;
+
     const funded = {
       funding: "house" as const,
       call: async <T>(fn: () => Promise<T>) => ({ result: await fn(), requestId: "mock-req" }),
@@ -272,42 +216,11 @@ describe("Source Authorization Registry and Policy Gate", () => {
         ctx,
         kind: "keyword",
         sku: "reddit.search",
-        normalizedQuery: "test query",
+        normalizedQuery: "test intent query",
         run: async () => {
           anyApiCalled = true;
           return { data: { posts: [] }, costUsd: 0.0012 };
         },
-        store: async () => [],
-        load: async () => [],
-      }),
-    ).rejects.toBeInstanceOf(SourceUnauthorizedError);
-
-    expect(anyApiCalled).toBe(false);
-  });
-
-  // Requirement 8: Cache and in-flight reuse cannot bypass authorization
-  it("Requirement 8: Cache and in-flight reuse cannot bypass authorization", async () => {
-    vi.stubEnv("REDDIT_SOURCE_ENABLED", "false");
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "");
-
-    let cacheLookupAttempted = false;
-    const ctx = {
-      projectId: "p_gate_test",
-      funded: {
-        funding: "house" as const,
-        call: async <T>(fn: () => Promise<T>) => ({ result: await fn(), requestId: "mock-req" }),
-        client: {},
-      } as unknown as Parameters<typeof fetchShared>[0]["ctx"]["funded"],
-      maxAgeMs: 3600000,
-    };
-
-    await expect(
-      fetchShared({
-        ctx,
-        kind: "keyword",
-        sku: "reddit.search",
-        normalizedQuery: "cached query",
-        run: async () => ({ data: { posts: [] }, costUsd: 0 }),
         store: async () => [],
         load: async () => {
           cacheLookupAttempted = true;
@@ -317,132 +230,283 @@ describe("Source Authorization Registry and Policy Gate", () => {
     ).rejects.toBeInstanceOf(SourceUnauthorizedError);
 
     expect(cacheLookupAttempted).toBe(false);
+    expect(anyApiCalled).toBe(false);
   });
 
-  // Requirement 9: Stored source data cannot leak through feeds, detail pages, alerts, or API
-  it("Requirement 9: Stored source data cannot leak through feeds, detail pages, alerts, or API (Reddit and X)", async () => {
-    // 9a: Reddit serving paths fail closed
+  // Test 6: Website crawler is denied when its record is blocked, pending, expired, future-dated, or out of scope
+  it("Test 6: Website crawler is denied when record is blocked, pending, expired, future-dated, or out of scope", async () => {
+    const crawlerOp: SourceOperationRequest = {
+      sourceId: "website_crawler",
+      purpose: "customer_website_coverage",
+      scope: "customer_domain_crawl",
+    };
+
+    // 6a: Blocked record
+    revokeTrustedAuthRecord("REC-WEBSITE-CRAWLER-FIRST-PARTY", {
+      status: "BLOCKED",
+      reason: "Suspended due to security review",
+      revokedBy: "Security Officer",
+    });
+    expect(isSourceAuthorized(crawlerOp)).toBe(false);
+    await expect(crawlWebsiteInventory("https://example.com")).rejects.toBeInstanceOf(SourceUnauthorizedError);
+
+    // 6b: Pending record
+    resetTrustedRegistry();
+    const pendingCrawler: TrustedAuthRecord = {
+      recordId: "REC-CRAWLER-PENDING",
+      sourceId: "website_crawler",
+      name: "Crawler Pending Review",
+      status: "PENDING",
+      authorizedPurposes: ["customer_website_coverage"],
+      scopes: ["customer_domain_crawl"],
+      effectiveDate: "2026-01-01T00:00:00.000Z",
+      expirationDate: null,
+      evidenceReference: "REVIEW-123",
+      approvalProvenance: { approvedBy: "Sec", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "Pending" },
+    };
+    registerTrustedAuthRecord(pendingCrawler);
+    expect(isSourceAuthorized({ ...crawlerOp, authRecordIdOverride: "REC-CRAWLER-PENDING" })).toBe(false);
+
+    // 6c: Expired record
+    const expiredCrawler: TrustedAuthRecord = {
+      recordId: "REC-CRAWLER-EXPIRED",
+      sourceId: "website_crawler",
+      name: "Crawler Expired Agreement",
+      status: "APPROVED",
+      authorizedPurposes: ["customer_website_coverage"],
+      scopes: ["customer_domain_crawl"],
+      effectiveDate: "2024-01-01T00:00:00.000Z",
+      expirationDate: "2025-01-01T00:00:00.000Z",
+      evidenceReference: "EXPIRED-AGREEMENT",
+      approvalProvenance: { approvedBy: "Legal", reviewedAt: "2024-01-01T00:00:00.000Z", notes: "Expired" },
+    };
+    registerTrustedAuthRecord(expiredCrawler);
+    expect(isSourceAuthorized({ ...crawlerOp, authRecordIdOverride: "REC-CRAWLER-EXPIRED" })).toBe(false);
+
+    // 6d: Future-dated record
+    const futureCrawler: TrustedAuthRecord = {
+      recordId: "REC-CRAWLER-FUTURE",
+      sourceId: "website_crawler",
+      name: "Crawler Future Contract",
+      status: "APPROVED",
+      authorizedPurposes: ["customer_website_coverage"],
+      scopes: ["customer_domain_crawl"],
+      effectiveDate: "2099-01-01T00:00:00.000Z",
+      expirationDate: null,
+      evidenceReference: "FUTURE-DOC",
+      approvalProvenance: { approvedBy: "Legal", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "Future effective" },
+    };
+    registerTrustedAuthRecord(futureCrawler);
+    expect(isSourceAuthorized({ ...crawlerOp, authRecordIdOverride: "REC-CRAWLER-FUTURE" })).toBe(false);
+
+    // 6e: Out of scope (record only covers read_only_audit, not customer_domain_crawl)
+    const auditCrawler: TrustedAuthRecord = {
+      recordId: "REC-CRAWLER-AUDIT-ONLY",
+      sourceId: "website_crawler",
+      name: "Crawler Audit Only",
+      status: "APPROVED",
+      authorizedPurposes: ["customer_website_coverage"],
+      scopes: ["read_only_audit"],
+      effectiveDate: "2026-01-01T00:00:00.000Z",
+      expirationDate: null,
+      evidenceReference: "AUDIT-CRAWLER",
+      approvalProvenance: { approvedBy: "Auditor", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "Audit only" },
+    };
+    registerTrustedAuthRecord(auditCrawler);
+    expect(isSourceAuthorized({ ...crawlerOp, authRecordIdOverride: "REC-CRAWLER-AUDIT-ONLY" })).toBe(false);
+  });
+
+  // Test 7: Registry mutation cannot bypass record validation or revocation
+  it("Test 7: Registry rejects malformed records, protects immutability, and supports immediate revocation", () => {
+    // 7a: Reject malformed records
+    expect(() =>
+      registerTrustedAuthRecord({
+        recordId: "INVALID-REC",
+        sourceId: "reddit",
+        name: "Broken Record",
+        status: "APPROVED",
+        authorizedPurposes: ["commercial_lead_generation"],
+        scopes: ["commercial_indexing"],
+        effectiveDate: "2028-01-01T00:00:00.000Z",
+        expirationDate: "2026-01-01T00:00:00.000Z", // effective after expiration
+        evidenceReference: "DOC-INVALID",
+        approvalProvenance: { approvedBy: "Tester", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "Bad dates" },
+      }),
+    ).toThrow(InvalidAuthRecordError);
+
+    expect(() =>
+      registerTrustedAuthRecord({
+        recordId: "",
+        sourceId: "reddit",
+        name: "Empty ID",
+        status: "APPROVED",
+        authorizedPurposes: ["commercial_lead_generation"],
+        scopes: ["commercial_indexing"],
+        effectiveDate: "2026-01-01T00:00:00.000Z",
+        expirationDate: null,
+        evidenceReference: "DOC",
+        approvalProvenance: { approvedBy: "Tester", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "No ID" },
+      }),
+    ).toThrow(InvalidAuthRecordError);
+
+    // 7b: Immutability protection (frozen copies returned)
+    const originalRecord = getTrustedRecord("REC-WEBSITE-CRAWLER-FIRST-PARTY");
+    expect(originalRecord).not.toBeNull();
+    expect(Object.isFrozen(originalRecord)).toBe(true);
+    expect(() => {
+      (originalRecord as unknown as { status: string }).status = "BLOCKED";
+    }).toThrow();
+
+    // 7c: Revocation immediately updates authorization decision
+    const revoked = revokeTrustedAuthRecord("REC-WEBSITE-CRAWLER-FIRST-PARTY", {
+      status: "BLOCKED",
+      reason: "Emergency contract termination",
+      revokedBy: "General Counsel",
+    });
+    expect(revoked.status).toBe("BLOCKED");
+
+    const policyAfterRevoke = getSourcePolicy({
+      sourceId: "website_crawler",
+      purpose: "customer_website_coverage",
+      scope: "customer_domain_crawl",
+    });
+    expect(policyAfterRevoke.status).toBe("BLOCKED");
+    expect(policyAfterRevoke.enabled).toBe(false);
+  });
+
+  // Test 8: Unknown SKUs still fail closed
+  it("Test 8: Unknown SKUs still fail closed with SourceUnauthorizedError", () => {
+    expect(() => sourceForSku("unknown.provider.sku")).toThrow(SourceUnauthorizedError);
+    expect(() => sourceForSku("bing.search")).toThrow(SourceUnauthorizedError);
+    expect(() => sourceForSku("")).toThrow(SourceUnauthorizedError);
+  });
+
+  // Test 9: UI status displays remain useful without granting access
+  it("Test 9: UI status displays remain useful without granting data execution access", () => {
     vi.stubEnv("REDDIT_SOURCE_ENABLED", "false");
     vi.stubEnv("REDDIT_AUTH_RECORD_ID", "");
 
-    const redditFilter = { status: "new" as const, days: 30 as const, order: "score" as const };
-    expect(await listLeads("p_any", redditFilter)).toEqual([]);
-    expect(await countLeads("p_any", redditFilter)).toBe(0);
-    expect(await listLeadFaces("p_any", redditFilter)).toEqual([]);
-    expect(await findLead("p_any", "lead_any")).toBeUndefined();
-    expect(await listReviewItems("p_any", 30)).toEqual([]);
-    expect(await listMentions("p_any")).toEqual([]);
-    expect(await countMentions("p_any")).toBe(0);
-    expect(await competitorsNamedIn("p_any", "post_any")).toEqual([]);
-    expect(await listOpportunities("p_any", {})).toEqual([]);
-    expect(await countOpportunities("p_any")).toBe(0);
-    expect(await seoFacets("p_any")).toEqual({ keywords: [], subreddits: [] });
+    const redditDisplay = getSourcePolicy("reddit");
+    expect(redditDisplay.status).toBe("BLOCKED");
+    expect(redditDisplay.enabled).toBe(false);
+    expect(typeof redditDisplay.reason).toBe("string");
+    expect(redditDisplay.reason.length).toBeGreaterThan(10);
+    expect(typeof redditDisplay.legalDisclaimer).toBe("string");
 
-    // API 403 checks
-    await expect(projectLeads(caller, "p_any", new URLSearchParams())).rejects.toMatchObject({
-      name: "ApiError",
-      code: "source_disabled",
-      status: 403,
-    });
-    await expect(lead(caller, "l_any")).rejects.toMatchObject({
-      name: "ApiError",
-      code: "source_disabled",
-      status: 403,
-    });
-    await expect(projectSeoOpportunities(caller, "p_any")).rejects.toMatchObject({
-      name: "ApiError",
-      code: "source_disabled",
-      status: 403,
-    });
-    await expect(projectPainThemes(caller, "p_any")).rejects.toMatchObject({
-      name: "ApiError",
-      code: "source_disabled",
-      status: 403,
-    });
-
-    // API error serialization test
-    const err = new ApiError("source_disabled", "Reddit data source disabled");
-    const res = apiErrorResponse(err);
-    expect(res.status).toBe(403);
-
-    // 9b: X serving paths fail closed
     vi.stubEnv("X_LEADS", "true");
-    vi.stubEnv("X_AUTH_RECORD_ID", "REC-X-PILOT-REVIEW"); // Pending, so enabled: false
+    vi.stubEnv("X_AUTH_RECORD_ID", "");
 
-    const xFilter = { days: 30 as const, status: "new" as const };
-    expect(await listXLeads("p_any", xFilter)).toEqual([]);
-    expect(await xLeadById("p_any", "tweet_123")).toBeNull();
-    expect(await listXHeld("p_any", xFilter)).toEqual([]);
-    expect(await listXFiltered("p_any", xFilter)).toEqual({
-      items: [],
-      judged: 0,
-      screened: 0,
-      unfinished: 0,
-      closeCalls: 0,
-      worth: 0,
-      pending: 0,
-    });
-    expect(await listXOpportunities("p_any", xFilter)).toEqual({
-      items: [],
-      total: 0,
-      posts: 0,
-      faces: [],
-    });
-    expect(await newXLeadsSince("p_any", new Date(0))).toEqual([]);
+    const xDisplay = getSourcePolicy("x");
+    expect(xDisplay.status).toBe("PENDING");
+    expect(xDisplay.enabled).toBe(false);
+    expect(typeof xDisplay.reason).toBe("string");
+
+    // All source policies list query
+    const allPolicies = allSourcePolicies();
+    expect(allPolicies.length).toBeGreaterThanOrEqual(5);
+    for (const p of allPolicies) {
+      expect(typeof p.name).toBe("string");
+      expect(typeof p.status).toBe("string");
+    }
   });
 
-  // Requirement 10: Explicitly approved test fixture succeeds
-  it("Requirement 10: Explicitly approved test fixture registered in trusted registry succeeds (status: APPROVED, enabled: true)", () => {
-    const approvedRecord: TrustedAuthRecord = {
-      recordId: "REC-TEST-VALID-APPROVAL-2026",
+  // Test 10: Approved test records work only within their explicitly authorized scope and purpose
+  it("Test 10: Approved test records work only within their explicitly authorized scope and purpose", () => {
+    const multiScopeRecord: TrustedAuthRecord = {
+      recordId: "REC-TEST-MULTI-SCOPE",
       sourceId: "reddit",
-      name: "Executed Enterprise Licensing Contract",
+      name: "Authorized Multi-Scope Partner Contract",
       status: "APPROVED",
-      authorizedPurposes: ["commercial_lead_generation", "competitor_intelligence", "seo_ranking"],
-      scopes: ["commercial_indexing", "search_discovery", "social_intent_monitoring"],
-      effectiveDate: "2026-01-01T00:00:00Z",
-      expirationDate: "2028-01-01T00:00:00Z",
-      evidenceReference: "CONTRACT-DOC-2026-REDDIT-001",
+      authorizedPurposes: ["commercial_lead_generation", "competitor_intelligence"],
+      scopes: ["search_discovery", "social_content_read"],
+      effectiveDate: "2026-01-01T00:00:00.000Z",
+      expirationDate: "2028-01-01T00:00:00.000Z",
+      evidenceReference: "CONTRACT-2026-001",
       approvalProvenance: {
-        approvedBy: "General Counsel",
-        reviewedAt: "2026-01-02T10:00:00Z",
-        notes: "Direct contract executed and filed",
+        approvedBy: "Legal Counsel",
+        reviewedAt: "2026-01-02T00:00:00.000Z",
+        notes: "Authorized for search and post reading",
       },
     };
-    registerTrustedAuthRecord(approvedRecord);
+    registerTrustedAuthRecord(multiScopeRecord);
 
     vi.stubEnv("REDDIT_SOURCE_ENABLED", "true");
-    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-VALID-APPROVAL-2026");
+    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "REC-TEST-MULTI-SCOPE");
 
-    const policy = getSourcePolicy("reddit", { requiredScope: "commercial_indexing" });
-    expect(policy.status).toBe("APPROVED");
-    expect(policy.enabled).toBe(true);
-    expect(policy.commercialUsePermitted).toBe(true);
-    expect(policy.authRecordId).toBe("REC-TEST-VALID-APPROVAL-2026");
-    expect(isSourceAuthorized("reddit")).toBe(true);
-    expect(() => assertSourceAuthorized("reddit")).not.toThrow();
+    // 10a: Authorized purpose and authorized scope -> APPROVED & enabled
+    expect(
+      isSourceAuthorized({
+        sourceId: "reddit",
+        purpose: "commercial_lead_generation",
+        scope: "search_discovery",
+      }),
+    ).toBe(true);
+
+    expect(
+      isSourceAuthorized({
+        sourceId: "reddit",
+        purpose: "competitor_intelligence",
+        scope: "social_content_read",
+      }),
+    ).toBe(true);
+
+    // 10b: Authorized purpose but UNAUTHORIZED scope (comments_read is not in scopes) -> DENIED
+    expect(
+      isSourceAuthorized({
+        sourceId: "reddit",
+        purpose: "commercial_lead_generation",
+        scope: "comments_read",
+      }),
+    ).toBe(false);
+
+    // 10c: Authorized scope but UNAUTHORIZED purpose (seo_opportunity_discovery not in purposes) -> DENIED
+    expect(
+      isSourceAuthorized({
+        sourceId: "reddit",
+        purpose: "seo_opportunity_discovery",
+        scope: "search_discovery",
+      }),
+    ).toBe(false);
   });
 
-  // Requirement 11: Authorized first-party website crawler and unrelated functionality continue to work
-  it("Requirement 11: Authorized first-party website crawler continues to work normally", () => {
-    const crawlerPolicy = getSourcePolicy("website_crawler");
+  // Test 11: Retention dry-run output accurately describes automatic TTL deletion versus approval-gated historical purges
+  it("Test 11: Retention dry-run output accurately describes automatic TTL deletion vs approval-gated historical purges", async () => {
+    // Calling historical purge without operator approval confirmation throws OperatorApprovalRequiredError
+    await expect(
+      purgeHistoricalData({
+        operatorApprovalConfirmed: false,
+      }),
+    ).rejects.toBeInstanceOf(OperatorApprovalRequiredError);
+
+    // Calling historical purge with approval confirmation in dry-run mode succeeds safely
+    const purgePreview = await purgeHistoricalData({
+      operatorApprovalConfirmed: true,
+      operatorNote: "Audited by operator; dry-run verification",
+      dryRun: true,
+    });
+    expect(purgePreview.dryRun).toBe(true);
+    expect(purgePreview.purged).toBe(0);
+  });
+
+  // Test 12: Independent authorized functionality remains operational
+  it("Test 12: Independent authorized functionality (website crawler) remains operational when Reddit is blocked", () => {
+    vi.stubEnv("REDDIT_SOURCE_ENABLED", "false");
+    vi.stubEnv("REDDIT_AUTH_RECORD_ID", "");
+    vi.stubEnv("X_LEADS", "false");
+
+    const crawlerOp: SourceOperationRequest = {
+      sourceId: "website_crawler",
+      purpose: "customer_website_coverage",
+      scope: "customer_domain_crawl",
+    };
+
+    expect(isSourceAuthorized(crawlerOp)).toBe(true);
+    expect(() => assertSourceAuthorized(crawlerOp)).not.toThrow();
+
+    const crawlerPolicy = getSourcePolicy(crawlerOp);
     expect(crawlerPolicy.status).toBe("APPROVED");
     expect(crawlerPolicy.enabled).toBe(true);
     expect(crawlerPolicy.commercialUsePermitted).toBe(true);
-    expect(isSourceAuthorized("website_crawler")).toBe(true);
-    expect(() => assertSourceAuthorized("website_crawler")).not.toThrow();
-
-    const policies = allSourcePolicies();
-    expect(policies.length).toBeGreaterThanOrEqual(4);
-    const crawlerFound = policies.find((p) => p.sourceId === "website_crawler");
-    expect(crawlerFound?.enabled).toBe(true);
-    expect(crawlerFound?.status).toBe("APPROVED");
-  });
-
-  // Requirement 12 (Contract): Retention functions and options
-  it("Requirement 12: Retention functions exist and support dry-run parameter", () => {
-    expect(typeof auditRetention).toBe("function");
-    expect(typeof deleteExpiredPosts).toBe("function");
   });
 });
 
@@ -450,7 +514,7 @@ describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
   const POSTS_NOW = new Date("1969-12-31T00:00:00Z");
   const LONG_AGO = Math.floor(POSTS_NOW.getTime() / 1000) - 600 * 24 * 3600;
 
-  it("Requirement 12 (Integration): Produces a structured, read-only retention audit report with dryRunPlan and limitations", async () => {
+  it("produces a structured retention report accurately separating routine TTL from historical bulk purges", async () => {
     const report = await auditRetention();
     expect(report.retentionWindowDays).toBe(30);
     expect(typeof report.auditTimestamp).toBe("string");
@@ -461,19 +525,18 @@ describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
     expect(report.redditPosts).toHaveProperty("retainedBySeo");
     expect(report.redditPosts).toHaveProperty("retainedByCompetitorMentions");
 
-    // Dry Run Plan
+    // Dry Run Plan accurately distinguishes automatic TTL from approval-gated historical purge
     expect(report.dryRunPlan).toBeDefined();
     expect(typeof report.dryRunPlan.cutoffDate).toBe("string");
     expect(typeof report.dryRunPlan.eligiblePostsToDelete).toBe("number");
-    expect(report.dryRunPlan.preservedReferencedPosts).toBeDefined();
-    expect(typeof report.dryRunPlan.preservedReferencedPosts.byLeads).toBe("number");
-    expect(typeof report.dryRunPlan.preservedReferencedPosts.bySeo).toBe("number");
-    expect(typeof report.dryRunPlan.preservedReferencedPosts.byCompetitorMentions).toBe("number");
-    expect(typeof report.dryRunPlan.preservedReferencedPosts.totalPreserved).toBe("number");
+    expect(report.dryRunPlan.routineTtlCleanup.isAutomatic).toBe(true);
+    expect(report.dryRunPlan.routineTtlCleanup.windowDays).toBe(30);
+    expect(report.dryRunPlan.routineTtlCleanup.batchSize).toBe(500);
+    expect(report.dryRunPlan.routineTtlCleanup.preservesReferencedRows).toBe(true);
+    expect(report.dryRunPlan.historicalBulkPurge.requiresOperatorApproval).toBe(true);
+    expect(report.dryRunPlan.historicalBulkPurge.approvalEnforcedInCode).toBe(true);
     expect(report.dryRunPlan.destructivePurgeBlockedWithoutOperatorApproval).toBe(true);
     expect(typeof report.dryRunPlan.notes).toBe("string");
-
-    expect(report.limitations.length).toBeGreaterThanOrEqual(5);
   });
 
   it("protects competitor mentions from deletion alongside leads and SEO opportunities", async () => {

@@ -12,7 +12,19 @@ import { LEAD_AUTHOR, LEAD_AUTHOR_JOIN, LEAD_BODY, LEAD_URL, NEED_AT, leadsBase 
 import { redditLeadNotMuted, xLeadNotMuted } from "@/lib/mutes";
 import { canonicalUrl, ownWords } from "@/lib/x/map";
 import { headlineOf } from "@/lib/x/read";
-import { isSourceAuthorized } from "@/lib/sourcePolicy";
+import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
+
+const REDDIT_ALERT_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "commercial_lead_generation",
+  scope: "social_content_read",
+};
+
+const X_ALERT_OP: SourceOperationRequest = {
+  sourceId: "x",
+  purpose: "social_intent_monitoring",
+  scope: "social_content_read",
+};
 import { FRESH_SLACK_MS, type SelectableLead } from "./select";
 
 /**
@@ -25,7 +37,7 @@ import { FRESH_SLACK_MS, type SelectableLead } from "./select";
  * thread's own title, so a live send and a test agree.
  */
 export async function newLeadsSince(projectId: string, since: Date): Promise<SelectableLead[]> {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(REDDIT_ALERT_OP)) {
     return [];
   }
   const freshFrom = new Date(since.getTime() - FRESH_SLACK_MS);
@@ -77,7 +89,7 @@ export async function newLeadsSince(projectId: string, since: Date): Promise<Sel
  * own project row under an alias.
  */
 export function recentAlertableLeads(projectId: SQL, since: Date): SQL {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(REDDIT_ALERT_OP)) {
     return sql`leads where false`;
   }
   return sql`leads
@@ -133,7 +145,7 @@ export function xAskLead(
  * A post X no longer shows is left out, as the tab leaves it out.
  */
 export async function newXLeadsSince(projectId: string, since: Date): Promise<SelectableLead[]> {
-  if (!isSourceAuthorized("x")) {
+  if (!isSourceAuthorized(X_ALERT_OP)) {
     return [];
   }
   const rows = await db()

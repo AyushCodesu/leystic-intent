@@ -11,7 +11,13 @@ import { requireScanProject } from "@/lib/scan/project";
 import { cadenceFor } from "@/lib/settings/cadence";
 import { capped, tierForUser } from "@/lib/tier";
 import { RETENTION_DAYS } from "@/lib/tiers";
-import { isSourceAuthorized } from "@/lib/sourcePolicy";
+import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
+
+const COMPETITOR_SCAN_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "competitor_intelligence",
+  scope: "search_discovery",
+};
 import { classifyMentions, type MentionCandidate, type Verdict } from "./classify";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -149,7 +155,7 @@ export async function runCompetitorScan(
   const cadence = cadenceFor(settings.settings.cadence);
   // The tier decides how many competitors a project may watch.
   const names = capped(project.competitors, limits?.competitors);
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(COMPETITOR_SCAN_OP)) {
     await writeProgress(jobId, "Reddit source is unauthorized: competitor scan skipped");
     await enqueueJob("competitor_scan", projectId, cadence.nextRunAt(new Date()));
     return { competitors: names.length, read: 0, mentions: 0, skipped: 0, costUsd: 0 };

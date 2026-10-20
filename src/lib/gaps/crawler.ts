@@ -5,6 +5,7 @@ import {
   MAX_SITEMAP_BYTES,
 } from "./constants";
 import { extractPageMetadata, parseRobotsTxt, parseSitemapXml } from "./html";
+import { assertSourceAuthorized } from "@/lib/sourcePolicy";
 import { safeFetch, validateSafeUrl } from "./security";
 import type { DnsResolver, SafeHttpTransport } from "./security";
 import type { InspectedPage, PageInventoryResult } from "./types";
@@ -43,6 +44,12 @@ export async function crawlWebsiteInventory(
   rootUrl: string,
   options: CrawlOptions = {},
 ): Promise<PageInventoryResult> {
+  assertSourceAuthorized({
+    sourceId: "website_crawler",
+    purpose: "customer_website_coverage",
+    scope: "customer_domain_crawl",
+  });
+
   const fetchFn = options.fetchFn ?? fetch;
   const skipDnsCheck = options.skipDnsCheck ?? false;
   const dnsResolver = options.dnsResolver;

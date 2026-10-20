@@ -12,7 +12,13 @@ import { LEAD_AUTHOR, LEAD_AUTHOR_JOIN, LEAD_URL, NEED_AT } from "@/lib/leadSql"
 import { RETRIEVED_STATES } from "@/lib/scan/planStates";
 import { DAY_MS, daysAgo } from "@/lib/time";
 import { SENTIMENTS, type ReasonCategory, type Sentiment, type SwitchingEvidence } from "./classify";
-import { isSourceAuthorized } from "@/lib/sourcePolicy";
+import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
+
+const COMPETITOR_READ_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "competitor_intelligence",
+  scope: "social_content_read",
+};
 
 /** The window the competitor screen shows, matching the feed window. */
 export const MENTION_WINDOW_DAYS = 30;
@@ -102,7 +108,7 @@ export async function countMentions(
   projectId: string,
   days = MENTION_WINDOW_DAYS,
 ): Promise<number> {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(COMPETITOR_READ_OP)) {
     return 0;
   }
   const rows = await db()
@@ -129,7 +135,7 @@ export async function listMentions(
   projectId: string,
   days = MENTION_WINDOW_DAYS,
 ): Promise<MentionView[]> {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(COMPETITOR_READ_OP)) {
     return [];
   }
   const rows = await db()
@@ -180,7 +186,7 @@ export async function listMentions(
  * each once, in the order the project lists them. The detail pane's line.
  */
 export async function competitorsNamedIn(projectId: string, postId: string): Promise<string[]> {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(COMPETITOR_READ_OP)) {
     return [];
   }
   const rows = await db()

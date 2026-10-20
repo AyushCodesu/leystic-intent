@@ -37,8 +37,14 @@ import {
   REPLY_STALE_HOURS,
 } from "./constants";
 import { buyBio, joinedText, ParentWalkError, storedParents, walkParents } from "./context";
-import { isSourceAuthorized } from "@/lib/sourcePolicy";
+import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
 import { xEnabledFor } from "./enabled";
+
+const X_SCAN_OP: SourceOperationRequest = {
+  sourceId: "x",
+  purpose: "social_intent_monitoring",
+  scope: "social_intent_monitoring",
+};
 import { candidateOf, judgeX, storedRoute } from "./judge";
 import { XLaneRefusedError } from "./grammar";
 import { compileLanes, lanesInputHash, rivalSeeds, VENUE_FAMILIES, type SeedSlots } from "./lanes";
@@ -472,7 +478,7 @@ export async function runXScan(projectId: string, jobId: string | null): Promise
     .select({ id: projects.id, userId: projects.userId, name: projects.name, url: projects.url, scoring: projects.scoring })
     .from(projects)
     .where(eq(projects.id, projectId));
-  if (!project || !xEnabledFor(project.userId) || !isSourceAuthorized("x")) {
+  if (!project || !xEnabledFor(project.userId) || !isSourceAuthorized(X_SCAN_OP)) {
     return;
   }
   const [state] = await db().select().from(xProjects).where(eq(xProjects.projectId, projectId));

@@ -89,6 +89,29 @@ The architecture distinguishes two separate Google search mechanisms:
 
 ## 3. Source Authorization Register
 
+### Controlled Vocabulary for Purposes and Scopes
+
+To prevent arbitrary bypass strings, purposes and scopes are restricted to controlled vocabularies:
+
+- **Authorized Purposes (`SourceUsagePurpose`)**:
+  - `commercial_lead_generation`
+  - `competitor_intelligence`
+  - `seo_opportunity_discovery`
+  - `social_intent_monitoring`
+  - `customer_website_coverage`
+  - `compliance_audit`
+
+- **Authorized Scopes (`SourceUsageScope`)**:
+  - `search_discovery`
+  - `social_content_read`
+  - `comments_read`
+  - `profile_metadata_read`
+  - `customer_domain_crawl`
+  - `commercial_indexing`
+  - `social_intent_monitoring`
+  - `read_only_audit`
+  - `test_scope`
+
 ### Trusted Authorization Registry Schema
 
 Every managed source is governed by an authoritative record in the trusted registry (`src/lib/sourcePolicy.ts`):
@@ -96,23 +119,38 @@ Every managed source is governed by an authoritative record in the trusted regis
 ```ts
 export type TrustedAuthRecord = {
   recordId: string;
-  sourceId: DataSourceId;
+  sourceId: SourceId;
   name: string;
   status: SourceAuthStatus; // "PENDING" | "APPROVED" | "BLOCKED" | "EXPIRED"
-  authorizedPurposes: string[];
-  scopes: string[];
-  effectiveDate?: string;
-  expirationDate?: string;
+  authorizedPurposes: SourceUsagePurpose[];
+  scopes: SourceUsageScope[];
+  effectiveDate: string; // ISO 8601
+  expirationDate: string | null; // ISO 8601 or null
   evidenceReference: string;
   approvalProvenance: {
-    reviewer: string;
+    approvedBy: string;
     reviewedAt: string;
     notes: string;
   };
 };
+
+export type SourceOperationRequest = {
+  sourceId: SourceId;
+  purpose: SourceUsagePurpose;
+  scope: SourceUsageScope;
+  now?: Date;
+  authRecordIdOverride?: string;
+};
 ```
 
-Software treats this registry as the sole source of truth. Setting an environment variable to a fabricated record ID fails closed. Software enforces that `enabled = true` only when a recognized record has status `APPROVED`, falls within valid temporal bounds, and matches the requested operation scope.
+Software treats this registry as the sole source of truth. Setting an environment variable to a fabricated record ID fails closed. Software enforces that `enabled = true` only when a recognized record has status `APPROVED`, falls within valid temporal bounds, and explicitly covers the requested operation purpose and scope.
+
+### Registry Protection, Immutability & Revocation
+
+1. **Validation on Registration**: All records registered via `registerTrustedAuthRecord` are strictly validated by `validateTrustedAuthRecord`. Non-empty identifiers, valid date strings, `effectiveDate <= expirationDate`, valid provenance, and valid purpose/scope values are required.
+2. **Defensive Immutability**: All records in the registry store are deep cloned and sealed with `Object.freeze` to prevent in-memory property tampering.
+3. **Immediate Revocation**: Records can be revoked immediately using `revokeTrustedAuthRecord(recordId, { status: "BLOCKED" | "EXPIRED", reason, revokedBy })`. Revocations immediately cascade to all subsequent `getSourcePolicy` and `assertSourceAuthorized` checks without server restarts.
+4. **Operation-Specific Enforcement**: Execution calls must supply `{ sourceId, purpose, scope }`. If purpose or scope is omitted (e.g. UI banners), the policy evaluator treats the call as a status/display query, returning `enabled: false` and the current `status`.
 
 ### Authoritative Registered Records
 
@@ -259,6 +297,8 @@ To ensure software cannot inadvertently violate authorization boundaries, the re
   * `cutoffDate`: ISO timestamp representing the 30-day cutoff threshold.
   * `eligiblePostsToDelete`: count of expired posts without references.
   * `preservedReferencedPosts`: breakdown of preserved posts referenced by `leads`, `seoOpportunities`, and `competitorMentions`.
+  * `routineTtlCleanup`: confirms automatic 30-day bounded batch (500) TTL cleanup runs without operator approval while preserving referenced rows.
+  * `historicalBulkPurge`: confirms destructive bulk or historical purges are gated by code requiring explicit operator approval (`operatorApprovalConfirmed: true`), throwing `OperatorApprovalRequiredError` if unconfirmed.
   * `destructivePurgeBlockedWithoutOperatorApproval: true`: confirmation that destructive purging is prevented.
 - **Controlled Deletion**: Destructive cleanup of orphaned or expired records must never run as an automated unmonitored script. The scheduler runs only bounded batches (`RETENTION_BATCH = 500`).
 - **Data Erasure Requests**: If an individual submits an erasure request for their Reddit username or post, the operator must execute a targeted database deletion across `reddit_posts`, `reddit_comments`, and `reddit_authors`.

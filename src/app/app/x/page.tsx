@@ -3,7 +3,7 @@ import { XTab, type XParams } from "@/components/x/XTab";
 import { requireLocalUser } from "@/lib/auth";
 import { requireActiveProject } from "@/lib/projects";
 import { config } from "@/lib/config";
-import { getSourcePolicy, isSourceAuthorized } from "@/lib/sourcePolicy";
+import { getSourcePolicy } from "@/lib/sourcePolicy";
 
 type XPageProps = { searchParams: Promise<XParams> };
 
@@ -15,9 +15,9 @@ export default async function XPage({ searchParams }: XPageProps) {
   }
   const params = await searchParams;
   const project = await requireActiveProject(user.id, params.project);
+  const policy = getSourcePolicy("x");
 
-  if (!isSourceAuthorized("x")) {
-    const policy = getSourcePolicy("x");
+  if (!policy.enabled) {
     return (
       <div className="flex max-w-5xl flex-col gap-6">
         <div className="flex flex-col gap-1">

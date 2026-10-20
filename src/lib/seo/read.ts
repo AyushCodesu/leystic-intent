@@ -9,7 +9,13 @@ import {
   subreddits,
 } from "@/db/schema";
 import type { Relevance } from "@/lib/discovery/label";
-import { isSourceAuthorized } from "@/lib/sourcePolicy";
+import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
+
+const SEO_READ_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "seo_opportunity_discovery",
+  scope: "social_content_read",
+};
 import type { RankingThread } from "./thread";
 
 /**
@@ -169,7 +175,7 @@ function conditions(filter: SeoFilter) {
  * whichever order the reader asked for, never the last word on it.
  */
 export async function listOpportunities(projectId: string, filter: SeoFilter) {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(SEO_READ_OP)) {
     return [];
   }
   const judged = verdicts(projectId);
@@ -206,7 +212,7 @@ export async function listOpportunities(projectId: string, filter: SeoFilter) {
  * and its community on every page of the app.
  */
 export async function countOpportunities(projectId: string): Promise<number> {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(SEO_READ_OP)) {
     return 0;
   }
   const rows = await db()
@@ -227,7 +233,7 @@ export async function countOpportunities(projectId: string): Promise<number> {
  * not offered as a filter that would show nothing.
  */
 export async function seoFacets(projectId: string, filter: SeoFilter = {}): Promise<SeoFacets> {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(SEO_READ_OP)) {
     return { keywords: [], subreddits: [] };
   }
   const rows = await db()

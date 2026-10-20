@@ -1,6 +1,18 @@
 import { RETENTION_DAYS } from "@/lib/tiers";
 import { xEnabledFor } from "@/lib/x/enabled";
-import { isSourceAuthorized } from "@/lib/sourcePolicy";
+import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
+
+const REDDIT_API_LEADS_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "commercial_lead_generation",
+  scope: "social_content_read",
+};
+
+const REDDIT_API_SEO_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "seo_opportunity_discovery",
+  scope: "social_content_read",
+};
 import type { ApiCaller } from "./auth";
 import { parseLeadQuery } from "./leadsQuery";
 import { getApiLead, listApiLeads } from "./leadsRead";
@@ -70,7 +82,7 @@ export async function projectLeads(
   projectId: string,
   params: URLSearchParams,
 ) {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(REDDIT_API_LEADS_OP)) {
     throw new ApiError(
       "source_disabled",
       "Reddit data source is disabled: commercial authorization is missing or pending review.",
@@ -81,7 +93,7 @@ export async function projectLeads(
 }
 
 export async function lead(caller: ApiCaller, leadId: string) {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(REDDIT_API_LEADS_OP)) {
     throw new ApiError(
       "source_disabled",
       "Reddit data source is disabled: commercial authorization is missing or pending review.",
@@ -95,7 +107,7 @@ export async function lead(caller: ApiCaller, leadId: string) {
 }
 
 export async function projectSeoOpportunities(caller: ApiCaller, projectId: string) {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(REDDIT_API_SEO_OP)) {
     throw new ApiError(
       "source_disabled",
       "Reddit SEO opportunity tracking is disabled: commercial authorization is missing or pending review.",
@@ -106,7 +118,7 @@ export async function projectSeoOpportunities(caller: ApiCaller, projectId: stri
 }
 
 export async function projectPainThemes(caller: ApiCaller, projectId: string) {
-  if (!isSourceAuthorized("reddit")) {
+  if (!isSourceAuthorized(REDDIT_API_LEADS_OP)) {
     throw new ApiError(
       "source_disabled",
       "Pain themes derived from Reddit are disabled: commercial authorization is missing or pending review.",
