@@ -112,9 +112,28 @@ To prevent arbitrary bypass strings, purposes and scopes are restricted to contr
   - `read_only_audit`
   - `test_scope`
 
-### Trusted Authorization Registry Schema
+### Trusted Authorization Registry Schema & Persistent Storage
 
-Every managed source is governed by an authoritative record in the trusted registry (`src/lib/sourcePolicy.ts`):
+Every managed source is governed by an authoritative record in the trusted registry (`src/lib/sourcePolicy.ts`). The registry is durably backed by PostgreSQL tables created in migration `drizzle/0043_source_authorization_registry.sql` (`src/db/schema/sourceAuth.ts`):
+
+1. **`source_auth_records` Table**:
+   - `record_id`: primary key (e.g. `REC-REDDIT-COMMERCIAL-UNVERIFIED`).
+   - `source_id`: text identifier (`reddit`, `x`, `google_scraped_serp`, `google_official_api`, `website_crawler`).
+   - `name`: descriptive title of the agreement or gate record.
+   - `status`: authoritative gate state (`PENDING`, `APPROVED`, `BLOCKED`, `EXPIRED`).
+   - `authorized_purposes`: JSON array of approved `SourceUsagePurpose` values.
+   - `scopes`: JSON array of approved `SourceUsageScope` values.
+   - `effective_date`: UTC timestamp marking start of validity.
+   - `expiration_date`: optional UTC timestamp marking expiration.
+   - `evidence_reference`: pointer to external executed contract, DPA, or audit document.
+   - `approval_provenance`: JSON object tracking `approvedBy`, `reviewedAt`, and `notes`.
+   - `revocation_reason`: optional reason documenting why a record was blocked or expired.
+   - `revoked_at` / `revoked_by`: timestamps and actor attribution for revocations.
+   - `created_at` / `updated_at`: audit timestamps.
+
+2. **`source_auth_audit_events` Table**:
+   - Append-only transactional audit ledger recording every administrative mutation.
+   - Tracks `id`, `record_id`, `action` (`REGISTER`, `UPDATE`, `APPROVE`, `REVOKE`), `performed_by`, `actor_role` (`system_administrator`, `compliance_officer`, `legal_counsel`), `evidence_reference`, `reason`, `previous_status`, `new_status`, `details`, and `created_at`.
 
 ```ts
 export type TrustedAuthRecord = {
@@ -132,6 +151,10 @@ export type TrustedAuthRecord = {
     reviewedAt: string;
     notes: string;
   };
+  revocationReason?: string | null;
+  revokedAt?: string | null;
+  revokedBy?: string | null;
+  updatedAt?: string;
 };
 
 export type SourceOperationRequest = {
@@ -145,12 +168,47 @@ export type SourceOperationRequest = {
 
 Software treats this registry as the sole source of truth. Setting an environment variable to a fabricated record ID fails closed. Software enforces that `enabled = true` only when a recognized record has status `APPROVED`, falls within valid temporal bounds, and explicitly covers the requested operation purpose and scope.
 
-### Registry Protection, Immutability & Revocation
+### Operator Authorization Boundary & Unblock Protection
 
-1. **Validation on Registration**: All records registered via `registerTrustedAuthRecord` are strictly validated by `validateTrustedAuthRecord`. Non-empty identifiers, valid date strings, `effectiveDate <= expirationDate`, valid provenance, and valid purpose/scope values are required.
-2. **Defensive Immutability**: All records in the registry store are deep cloned and sealed with `Object.freeze` to prevent in-memory property tampering.
-3. **Immediate Revocation**: Records can be revoked immediately using `revokeTrustedAuthRecord(recordId, { status: "BLOCKED" | "EXPIRED", reason, revokedBy })`. Revocations immediately cascade to all subsequent `getSourcePolicy` and `assertSourceAuthorized` checks without server restarts.
-4. **Operation-Specific Enforcement**: Execution calls must supply `{ sourceId, purpose, scope }`. If purpose or scope is omitted (e.g. UI banners), the policy evaluator treats the call as a status/display query, returning `enabled: false` and the current `status`.
+1. **Mandatory Operator Context**:
+   - Administrative mutations (`operatorApproveRecord`, `operatorRevokeRecord`, `operatorRegisterRecord`) require an explicit `OperatorContext`:
+     * `operatorId`: non-empty operator identifier.
+     * `role`: strictly controlled role: `system_administrator`, `compliance_officer`, or `legal_counsel`.
+     * `operatorKey`: optional credential verified against `OPERATOR_SECRET_KEY` when configured.
+   - Arbitrary runtime code, unauthenticated web requests, and background jobs cannot mutate registry state.
+
+2. **Unblock Protection Invariants**:
+   - A record currently marked `BLOCKED` or `EXPIRED` cannot be silently overwritten to `APPROVED` by a routine update.
+   - Unblocking requires explicit `unblockConfirmed: true`.
+   - Unblocking requires role authorization restricted to `legal_counsel` or `compliance_officer` (system administrators cannot unilaterally unblock legally revoked records).
+   - Unblocking requires a new, distinct `evidenceReference` documenting the new legal basis. Re-using the prior evidence reference is rejected.
+
+3. **Validation & Defensive Immutability**:
+   - All records are validated on registration via `validateTrustedAuthRecord` (dates, non-empty IDs, purpose/scope membership).
+   - In-memory registry reads return deeply cloned, frozen objects (`Object.freeze`) to prevent in-place tampering.
+   - Revocation synchronously invalidates cached policy state across workers and process restarts.
+
+4. **Acquisition Operation Context Mapping**:
+   Every production source acquisition is strictly bound to its specific consuming purpose and scope via `ACQUISITION_OPERATIONS` and validated at the `operationForFetch()` seam before execution:
+
+   | Acquisition Operation | SKU | Fetch Kind | Consuming Purpose | Required Scope |
+   |---|---|---|---|---|
+   | `lead_search` | `reddit.search` | `keyword` | `commercial_lead_generation` | `search_discovery` |
+   | `lead_subreddit_posts` | `reddit.subreddit_posts` | `subreddit_posts` | `commercial_lead_generation` | `search_discovery` |
+   | `lead_post` | `reddit.post` | `post` | `commercial_lead_generation` | `social_content_read` |
+   | `lead_comments` | `reddit.post_comments` | `comments` | `commercial_lead_generation` | `comments_read` |
+   | `lead_profile` | `reddit.avatar` | `profile` | `commercial_lead_generation` | `profile_metadata_read` |
+   | `lead_subreddit_details` | `reddit.subreddit_details` | `subreddit` | `commercial_lead_generation` | `search_discovery` |
+   | `competitor_search` | `reddit.search` | `keyword` | `competitor_intelligence` | `search_discovery` |
+   | `competitor_post` | `reddit.post` | `post` | `competitor_intelligence` | `social_content_read` |
+   | `seo_google_search` | `google.search` | `serp` | `seo_opportunity_discovery` | `search_discovery` |
+   | `seo_post` | `reddit.post` | `post` | `seo_opportunity_discovery` | `social_content_read` |
+   | `x_search` | `twitter.search` | `x_search` | `social_intent_monitoring` | `search_discovery` |
+   | `x_tweet` | `twitter.tweet` | `x_tweet` | `social_intent_monitoring` | `social_content_read` |
+   | `x_profile` | `twitter.profile` | `x_profile` | `social_intent_monitoring` | `profile_metadata_read` |
+   | `website_crawl` | N/A (crawler) | N/A | `customer_website_coverage` | `customer_domain_crawl` |
+
+   If any acquisition path lacks explicit purpose or scope context, or if an unpermitted combination is requested, `operationForFetch()` immediately throws `SourceUnauthorizedError` and fails closed before cache or network operations.
 
 ### Authoritative Registered Records
 
@@ -293,12 +351,15 @@ To ensure software cannot inadvertently violate authorization boundaries, the re
 3. **Attribution & Excerpt Display**: Leystic displays excerpts (`EXCERPT_CHARS = 280`) and links to the original Reddit thread (`LEAD_URL`). If the thread is deleted, the canonical link becomes a 404, but stored excerpts remain in `reddit_posts` until the retention job runs.
 
 ### Operator Actions & Deletion Playbook
+- **Distinction Between Routine TTL and Historical Purges**:
+  * **Routine 30-Day TTL Expiration**: Runs automatically via the scheduler (`deleteExpiredPosts`), deleting expired unreferenced posts in bounded batches (`RETENTION_BATCH = 500`). It strictly preserves posts referenced by active leads, SEO opportunities, and competitor mentions.
+  * **Historical Bulk Purge (Deferred Implementation)**: Historical bulk purges outside the routine 30-day TTL require explicit operator confirmation (`operatorApprovalConfirmed: true`). Calling without confirmation throws `OperatorApprovalRequiredError`. In the current codebase, destructive historical bulk purge execution is deferred (`isImplemented: false`, status `deferred_not_implemented`). The API truthfully reports deferred status and does not pretend that historical bulk deletion took place.
 - **Dry-Run Audit & Plan**: Operators can call `auditRetention()` or `deleteExpiredPosts(now, batch, { dryRun: true })` at any time. `auditRetention()` returns a structured `RetentionDryRunPlan` including:
   * `cutoffDate`: ISO timestamp representing the 30-day cutoff threshold.
   * `eligiblePostsToDelete`: count of expired posts without references.
   * `preservedReferencedPosts`: breakdown of preserved posts referenced by `leads`, `seoOpportunities`, and `competitorMentions`.
   * `routineTtlCleanup`: confirms automatic 30-day bounded batch (500) TTL cleanup runs without operator approval while preserving referenced rows.
-  * `historicalBulkPurge`: confirms destructive bulk or historical purges are gated by code requiring explicit operator approval (`operatorApprovalConfirmed: true`), throwing `OperatorApprovalRequiredError` if unconfirmed.
+  * `historicalBulkPurge`: confirms destructive bulk or historical purges are gated by code requiring explicit operator approval (`operatorApprovalConfirmed: true`), throwing `OperatorApprovalRequiredError` if unconfirmed, and reports `isImplemented: false` with status `deferred_not_implemented`.
   * `destructivePurgeBlockedWithoutOperatorApproval: true`: confirmation that destructive purging is prevented.
 - **Controlled Deletion**: Destructive cleanup of orphaned or expired records must never run as an automated unmonitored script. The scheduler runs only bounded batches (`RETENTION_BATCH = 500`).
 - **Data Erasure Requests**: If an individual submits an erasure request for their Reddit username or post, the operator must execute a targeted database deletion across `reddit_posts`, `reddit_comments`, and `reddit_authors`.

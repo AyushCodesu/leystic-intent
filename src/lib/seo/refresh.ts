@@ -10,6 +10,7 @@ import {
 import { competitorsInThread, writeThreadMentions } from "@/lib/competitors/threads";
 import type { FetchContext } from "@/lib/reddit/fetch";
 import { fetchPost } from "@/lib/reddit/skus";
+import { ACQUISITION_OPERATIONS } from "@/lib/sourcePolicy";
 import type { StoredPost } from "@/lib/reddit/store";
 import { commentsAreCurrent, readLeadThreads, storedThreads } from "@/lib/scan/comments";
 import { loadEvaluations, writeEvaluations } from "@/lib/scan/evaluations";
@@ -43,7 +44,9 @@ async function readThread(
   url: string,
 ): Promise<{ post: StoredPost | null; costUsd: number }> {
   try {
-    const result = await fetchPost(ctx, url, ctx.maxAgeMs);
+    const result = await fetchPost(ctx, url, ctx.maxAgeMs, {
+      operation: ACQUISITION_OPERATIONS.seo_post,
+    });
     return { post: result.value[0] ?? null, costUsd: result.costUsd };
   } catch {
     return { post: null, costUsd: 0 };

@@ -2,6 +2,7 @@ import { enqueueJob, writeProgress } from "@/jobs/enqueue";
 import { clientForUser } from "@/lib/anyapi";
 import type { FetchContext } from "@/lib/reddit/fetch";
 import { fetchPost } from "@/lib/reddit/skus";
+import { ACQUISITION_OPERATIONS } from "@/lib/sourcePolicy";
 import { cadenceFor } from "@/lib/settings/cadence";
 import { threadPolicyFor } from "@/lib/settings/threadPolicy";
 import { tierForUser } from "@/lib/tier";
@@ -102,7 +103,9 @@ export async function runScan(projectId: string, jobId: string): Promise<ScanOut
     if (post.bodyObservedAt) {
       return post;
     }
-    const result = await fetchPost(ctx, post.url, RETENTION_MS);
+    const result = await fetchPost(ctx, post.url, RETENTION_MS, {
+      operation: ACQUISITION_OPERATIONS.lead_post,
+    });
     return result.value[0] ?? post;
   });
 

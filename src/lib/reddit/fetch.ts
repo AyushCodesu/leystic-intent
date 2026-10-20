@@ -6,7 +6,9 @@ import type { FundedClient, Funding } from "@/lib/anyapi";
 import { assertHouseDataUnderCap } from "@/lib/usage";
 import {
   assertSourceAuthorized,
+  isPermittedAcquisitionOperation,
   sourceForSku,
+  SourceUnauthorizedError,
   type SourceOperationRequest,
   type SourceUsagePurpose,
   type SourceUsageScope,
@@ -41,6 +43,7 @@ type SharedFetch<T> = {
   /** Every other effective parameter, canonicalized; see `searchRuns.variant`. */
   variant?: string;
   maxAgeMs?: number;
+  operation?: SourceOperationRequest;
   purpose?: SourceUsagePurpose;
   scope?: SourceUsageScope;
   run: () => Promise<{ data: unknown; costUsd: number; nextCursor?: string | null }>;
@@ -51,41 +54,36 @@ type SharedFetch<T> = {
 export function operationForFetch(input: {
   sku: string;
   kind: FetchKind;
+  operation?: SourceOperationRequest;
   purpose?: SourceUsagePurpose;
   scope?: SourceUsageScope;
 }): SourceOperationRequest {
   const sourceId = sourceForSku(input.sku);
-  let defaultPurpose: SourceUsagePurpose;
-  let defaultScope: SourceUsageScope;
+  const purpose = input.operation?.purpose ?? input.purpose;
+  const scope = input.operation?.scope ?? input.scope;
 
-  if (sourceId === "reddit") {
-    defaultPurpose = "commercial_lead_generation";
-    if (input.kind === "keyword" || input.kind === "subreddit_posts" || input.kind === "subreddit") {
-      defaultScope = "search_discovery";
-    } else if (input.kind === "comments") {
-      defaultScope = "comments_read";
-    } else {
-      defaultScope = "social_content_read";
-    }
-  } else if (sourceId === "x") {
-    defaultPurpose = "social_intent_monitoring";
-    if (input.kind === "x_search") {
-      defaultScope = "search_discovery";
-    } else {
-      defaultScope = "social_content_read";
-    }
-  } else if (sourceId === "google_scraped_serp") {
-    defaultPurpose = "seo_opportunity_discovery";
-    defaultScope = "search_discovery";
-  } else {
-    defaultPurpose = "commercial_lead_generation";
-    defaultScope = "search_discovery";
+  if (!purpose || !scope) {
+    throw new SourceUnauthorizedError(
+      sourceId,
+      `Operation context required: missing explicit purpose or scope for acquisition SKU '${input.sku}' (kind: '${input.kind}').`,
+      "BLOCKED",
+    );
+  }
+
+  if (!isPermittedAcquisitionOperation(input.sku, input.kind, purpose, scope)) {
+    throw new SourceUnauthorizedError(
+      sourceId,
+      `Unpermitted operation context for SKU '${input.sku}': purpose '${purpose}' with scope '${scope}' is not an authorized acquisition path.`,
+      "BLOCKED",
+    );
   }
 
   return {
     sourceId,
-    purpose: input.purpose ?? defaultPurpose,
-    scope: input.scope ?? defaultScope,
+    purpose,
+    scope,
+    now: input.operation?.now,
+    authRecordIdOverride: input.operation?.authRecordIdOverride,
   };
 }
 

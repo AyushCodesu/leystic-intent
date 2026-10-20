@@ -166,23 +166,53 @@ export type HistoricalPurgeOptions = {
   dryRun?: boolean;
 };
 
+export type HistoricalPurgePlan = {
+  isImplemented: false;
+  status: "deferred_not_implemented";
+  message: string;
+  eligible: number;
+  purged: number;
+  dryRun: boolean;
+  requiresOperatorApproval: true;
+  operatorApprovalConfirmed: boolean;
+};
+
 /**
- * Executes a destructive historical or bulk purge across historical tables.
- * Requires explicit operator approval (`operatorApprovalConfirmed: true`).
- * Without explicit operator approval, this function refuses to execute and throws OperatorApprovalRequiredError.
+ * Approval guard and planning placeholder for deferred historical bulk purging.
+ * Real historical purge functionality is intentionally deferred and not implemented in code.
+ * Requires explicit operator approval (`operatorApprovalConfirmed: true`); throws OperatorApprovalRequiredError otherwise.
  */
-export async function purgeHistoricalData(
+export async function planHistoricalPurge(
   options: HistoricalPurgeOptions,
   now = new Date(),
-): Promise<{ eligible: number; purged: number; dryRun: boolean }> {
+): Promise<HistoricalPurgePlan> {
   void now;
   if (!options.operatorApprovalConfirmed) {
     throw new OperatorApprovalRequiredError("historical_bulk_purge");
   }
-  if (options.dryRun) {
-    return { eligible: 0, purged: 0, dryRun: true };
-  }
-  return { eligible: 0, purged: 0, dryRun: false };
+  return {
+    isImplemented: false,
+    status: "deferred_not_implemented",
+    message:
+      "Historical purge execution is intentionally deferred and not implemented in code. Calling this function acts solely as an approval guard placeholder.",
+    eligible: 0,
+    purged: 0,
+    dryRun: options.dryRun ?? false,
+    requiresOperatorApproval: true,
+    operatorApprovalConfirmed: true,
+  };
+}
+
+/**
+ * Executes a destructive historical or bulk purge across historical tables.
+ * Preserved as an alias for planHistoricalPurge, enforcing operator approval while
+ * truthfully reporting that execution is deferred.
+ */
+export async function purgeHistoricalData(
+  options: HistoricalPurgeOptions,
+  now = new Date(),
+): Promise<HistoricalPurgePlan> {
+  return planHistoricalPurge(options, now);
 }
 
 export type RetentionBreakdown = {
@@ -211,8 +241,11 @@ export type RetentionDryRunPlan = {
     preservesReferencedRows: boolean;
   };
   historicalBulkPurge: {
+    isImplemented: boolean;
     requiresOperatorApproval: boolean;
     approvalEnforcedInCode: boolean;
+    status: string;
+    message: string;
   };
   destructivePurgeBlockedWithoutOperatorApproval: boolean;
   notes: string;
@@ -416,12 +449,16 @@ export async function auditRetention(now = new Date()): Promise<RetentionAuditRe
         preservesReferencedRows: true,
       },
       historicalBulkPurge: {
+        isImplemented: false,
         requiresOperatorApproval: true,
         approvalEnforcedInCode: true,
+        status: "deferred_not_implemented",
+        message:
+          "No destructive historical bulk purge operation is currently implemented; execution is deferred. Automated routine TTL cleanup is the only active deletion mechanism.",
       },
       destructivePurgeBlockedWithoutOperatorApproval: true,
       notes:
-        "Routine 30-day TTL expiration runs automatically in bounded batches, preserving referenced posts (leads, SEO, competitors). Destructive historical or bulk purges outside routine TTL require explicit operator approval enforced in code.",
+        "Routine 30-day TTL expiration runs automatically in bounded batches, preserving referenced posts (leads, SEO, competitors). Destructive historical or bulk purges outside routine TTL require explicit operator approval enforced in code; execution is currently deferred.",
     },
     limitations: [
       "AnyAPI gateway provides no webhooks or deletion events for user-deleted Reddit posts or comments.",

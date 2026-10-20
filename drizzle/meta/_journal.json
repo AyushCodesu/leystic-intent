@@ -281,6 +281,34 @@
       "when": 1790896388069,
       "tag": "0039_drop_dead_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1790896400000,
+      "tag": "0040_lead_outcomes",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1790896500000,
+      "tag": "0041_demand_page_gaps",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1790896600000,
+      "tag": "0042_competitor_reasons",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1790896700000,
+      "tag": "0043_source_authorization_registry",
+      "breakpoints": true
     }
   ]
 }

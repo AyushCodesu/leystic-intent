@@ -7,6 +7,12 @@ import { generateStructured } from "@/lib/llm";
 import { PROMO_POLICY_SYSTEM } from "@/lib/prompts";
 import { redditThread } from "@/lib/seo/links";
 import {
+  ACQUISITION_OPERATIONS,
+  type SourceOperationRequest,
+  type SourceUsagePurpose,
+  type SourceUsageScope,
+} from "@/lib/sourcePolicy";
+import {
   fetchShared,
   normalizeQuery,
   variantOf,
@@ -76,10 +82,18 @@ export async function fetchSearch(
     timeframe: "day" | "week" | "month" | "year";
     sort?: "relevance" | "new";
     cursor?: string;
+    operation?: SourceOperationRequest;
+    purpose?: SourceUsagePurpose;
+    scope?: SourceUsageScope;
   },
 ): Promise<SharedResult<PostPage>> {
   const { timeframe, cursor } = options;
   const sort = options.sort ?? "relevance";
+  const operation =
+    options.operation ??
+    (options.purpose && options.scope
+      ? { sourceId: "reddit" as const, purpose: options.purpose, scope: options.scope }
+      : undefined);
   return fetchShared<PostPage>({
     ctx,
     kind: "keyword",
@@ -88,6 +102,7 @@ export async function fetchSearch(
     sort,
     timeframe,
     variant: variantOf({ cursor }),
+    operation,
     run: async () => {
       const res = await ctx.funded.client.reddit.search({
         query,
@@ -111,9 +126,20 @@ export async function fetchSearch(
 export async function fetchSubredditPosts(
   ctx: FetchContext,
   subreddit: string,
-  options: { cursor?: string; limit?: number } = {},
+  options: {
+    cursor?: string;
+    limit?: number;
+    operation?: SourceOperationRequest;
+    purpose?: SourceUsagePurpose;
+    scope?: SourceUsageScope;
+  } = {},
 ): Promise<SharedResult<PostPage>> {
   const { cursor, limit } = options;
+  const operation =
+    options.operation ??
+    (options.purpose && options.scope
+      ? { sourceId: "reddit" as const, purpose: options.purpose, scope: options.scope }
+      : undefined);
   return fetchShared<PostPage>({
     ctx,
     kind: "subreddit_posts",
@@ -121,6 +147,7 @@ export async function fetchSubredditPosts(
     normalizedQuery: normalizeQuery(subreddit),
     sort: "new",
     variant: variantOf({ cursor, limit }),
+    operation,
     run: async () => {
       const res = await ctx.funded.client.reddit.subredditPosts({
         subreddit,
@@ -148,13 +175,24 @@ export async function fetchPost(
   ctx: FetchContext,
   url: string,
   maxAgeMs: number,
+  options?: {
+    operation?: SourceOperationRequest;
+    purpose?: SourceUsagePurpose;
+    scope?: SourceUsageScope;
+  },
 ): Promise<SharedResult<StoredPost[]>> {
+  const operation =
+    options?.operation ??
+    (options?.purpose && options?.scope
+      ? { sourceId: "reddit" as const, purpose: options.purpose, scope: options.scope }
+      : undefined);
   return fetchShared<StoredPost[]>({
     ctx,
     kind: "post",
     sku: "reddit.post",
     normalizedQuery: redditThread(url)?.postId ?? url,
     maxAgeMs,
+    operation,
     run: async () => {
       const res = await ctx.funded.client.reddit.post({ url });
       return { data: res.output.found ? { posts: [res.output.data] } : null, costUsd: res.costUsd };
@@ -168,12 +206,23 @@ export async function fetchPostComments(
   ctx: FetchContext,
   postId: string,
   url: string,
+  options?: {
+    operation?: SourceOperationRequest;
+    purpose?: SourceUsagePurpose;
+    scope?: SourceUsageScope;
+  },
 ): Promise<SharedResult<StoredComment[]>> {
+  const operation =
+    options?.operation ??
+    (options?.purpose && options?.scope
+      ? { sourceId: "reddit" as const, purpose: options.purpose, scope: options.scope }
+      : undefined);
   return fetchShared<StoredComment[]>({
     ctx,
     kind: "comments",
     sku: "reddit.post_comments",
     normalizedQuery: postId,
+    operation,
     run: async () => {
       const res = await ctx.funded.client.reddit.postComments({ url });
       return { data: res.output.found ? res.output.data : null, costUsd: res.costUsd };
@@ -200,12 +249,23 @@ const SUBREDDIT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export async function fetchSubredditDetails(
   ctx: FetchContext,
   subreddit: string,
+  options?: {
+    operation?: SourceOperationRequest;
+    purpose?: SourceUsagePurpose;
+    scope?: SourceUsageScope;
+  },
 ): Promise<SharedResult<SubredditFacts>> {
+  const operation =
+    options?.operation ??
+    (options?.purpose && options?.scope
+      ? { sourceId: "reddit" as const, purpose: options.purpose, scope: options.scope }
+      : ACQUISITION_OPERATIONS.lead_subreddit_details);
   return fetchShared<SubredditFacts>({
     ctx,
     kind: "subreddit",
     sku: "reddit.subreddit_details",
     normalizedQuery: normalizeQuery(subreddit),
+    operation,
     run: async () => {
       const res = await ctx.funded.client.reddit.subredditDetails({ subreddit });
       return { data: res.output.found ? res.output.data : null, costUsd: res.costUsd };
@@ -270,7 +330,11 @@ export async function promoPolicyFor(
     return known[0].promoPolicy;
   }
   const funded = await clientForUser(userId);
-  const result = await fetchSubredditDetails({ projectId, funded, maxAgeMs: SUBREDDIT_MAX_AGE_MS }, name);
+  const result = await fetchSubredditDetails(
+    { projectId, funded, maxAgeMs: SUBREDDIT_MAX_AGE_MS },
+    name,
+    { operation: ACQUISITION_OPERATIONS.lead_subreddit_details },
+  );
   if (!result.value) {
     return null;
   }
@@ -312,14 +376,25 @@ export async function fetchAuthorProfile(
   ctx: FetchContext,
   username: string,
   maxAgeMs: number,
+  options?: {
+    operation?: SourceOperationRequest;
+    purpose?: SourceUsagePurpose;
+    scope?: SourceUsageScope;
+  },
 ): Promise<SharedResult<AuthorFace>> {
   const key = normalizeQuery(username);
+  const operation =
+    options?.operation ??
+    (options?.purpose && options?.scope
+      ? { sourceId: "reddit" as const, purpose: options.purpose, scope: options.scope }
+      : ACQUISITION_OPERATIONS.lead_profile);
   return fetchShared<AuthorFace>({
     ctx,
     kind: "profile",
     sku: "reddit.avatar",
     normalizedQuery: key,
     maxAgeMs,
+    operation,
     run: async () => {
       const res = await ctx.funded.client.run<AvatarOutput>("reddit.avatar", { username });
       return { data: res.output.found ? res.output.data : null, costUsd: res.costUsd };

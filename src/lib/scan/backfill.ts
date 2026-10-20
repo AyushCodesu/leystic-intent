@@ -2,6 +2,7 @@ import { writeProgress } from "@/jobs/enqueue";
 import { clientForUser } from "@/lib/anyapi";
 import type { FetchContext } from "@/lib/reddit/fetch";
 import { fetchSearch } from "@/lib/reddit/skus";
+import { ACQUISITION_OPERATIONS } from "@/lib/sourcePolicy";
 import { asRawPost, upsertPosts, type StoredPost } from "@/lib/reddit/store";
 import { constraintQueries } from "@/lib/discovery/rank";
 import { TRIAGE_BATCH_SIZE } from "./constants";
@@ -207,6 +208,7 @@ async function walk(
       result = await fetchSearch(ctx, query.text, {
         timeframe: "year",
         sort,
+        operation: ACQUISITION_OPERATIONS.lead_search,
         ...(cursor ? { cursor } : {}),
       });
     } catch {

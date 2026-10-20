@@ -9,6 +9,7 @@ import {
   type FetchContext,
   type SharedResult,
 } from "@/lib/reddit/fetch";
+import { ACQUISITION_OPERATIONS } from "@/lib/sourcePolicy";
 import { redditResults, type GoogleResult } from "./links";
 
 export type StoredResult = typeof serpResults.$inferSelect;
@@ -110,6 +111,7 @@ export async function googleSearch(
     normalizedQuery: normalizeQuery(query),
     timeframe,
     variant: timeframe ? variantOf({ gl: GEO, hl: LANGUAGE }) : "",
+    operation: ACQUISITION_OPERATIONS.seo_google_search,
     run: async () => {
       const res = await ctx.funded.client.google.search({
         query,

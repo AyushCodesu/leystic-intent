@@ -11,7 +11,11 @@ import { requireScanProject } from "@/lib/scan/project";
 import { cadenceFor } from "@/lib/settings/cadence";
 import { capped, tierForUser } from "@/lib/tier";
 import { RETENTION_DAYS } from "@/lib/tiers";
-import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
+import {
+  ACQUISITION_OPERATIONS,
+  isSourceAuthorized,
+  type SourceOperationRequest,
+} from "@/lib/sourcePolicy";
 
 const COMPETITOR_SCAN_OP: SourceOperationRequest = {
   sourceId: "reddit",
@@ -108,7 +112,10 @@ async function scanOne(
   competitor: string,
 ): Promise<{ read: number; mentions: number; skipped: number; costUsd: number }> {
   await writeProgress(jobId, `Searching Reddit for ${competitor}`);
-  const found = await fetchSearch(ctx, competitor, { timeframe: "week" });
+  const found = await fetchSearch(ctx, competitor, {
+    timeframe: "week",
+    operation: ACQUISITION_OPERATIONS.competitor_search,
+  });
   let costUsd = found.costUsd;
   const known = await knownMentionPosts(ctx.projectId, competitor);
   const fresh = [...found.value.posts]
@@ -123,7 +130,9 @@ async function scanOne(
   // that post its full text rather than stranding the posts beside it.
   const opened = await inFlight(fresh, async (post) => {
     try {
-      const result = await fetchPost(ctx, post.url, RETENTION_MS);
+      const result = await fetchPost(ctx, post.url, RETENTION_MS, {
+        operation: ACQUISITION_OPERATIONS.competitor_post,
+      });
       return { post: result.value[0] ?? post, costUsd: result.costUsd };
     } catch {
       return { post, costUsd: 0 };

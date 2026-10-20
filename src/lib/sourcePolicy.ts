@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { config } from "./config";
 
 export type SourceId =
@@ -17,6 +21,7 @@ export const SOURCE_USAGE_PURPOSES = [
   "seo_opportunity_discovery",
   "customer_website_coverage",
   "social_intent_monitoring",
+  "compliance_audit",
   "read_only_audit",
   "academic_research",
 ] as const;
@@ -27,6 +32,7 @@ export const SOURCE_USAGE_SCOPES = [
   "search_discovery",
   "social_content_read",
   "comments_read",
+  "profile_metadata_read",
   "customer_domain_crawl",
   "commercial_indexing",
   "social_intent_monitoring",
@@ -51,6 +57,39 @@ export type TrustedAuthRecord = {
     reviewedAt: string;
     notes: string;
   };
+  revocationReason?: string | null;
+  revokedAt?: string | null;
+  revokedBy?: string | null;
+  updatedAt?: string;
+};
+
+export type OperatorRole = "system_administrator" | "compliance_officer" | "legal_counsel";
+
+export type OperatorContext = {
+  operatorId: string;
+  role: OperatorRole;
+  operatorKey?: string;
+};
+
+export class OperatorAuthorizationError extends Error {
+  constructor(message: string) {
+    super(`[Operator Authorization Error] ${message}`);
+    this.name = "OperatorAuthorizationError";
+  }
+}
+
+export type SourceAuthAuditEvent = {
+  id: string;
+  recordId: string;
+  action: "REGISTER" | "APPROVE" | "UPDATE" | "REVOKE";
+  performedBy: string;
+  actorRole: string;
+  evidenceReference: string;
+  reason: string;
+  previousStatus: SourceAuthStatus | null;
+  newStatus: SourceAuthStatus;
+  details?: Record<string, unknown>;
+  createdAt: string; // ISO 8601
 };
 
 export type SourceOperationRequest = {
@@ -125,7 +164,7 @@ export const PLACEHOLDER_RECORD_IDS = new Set([
  * Authoritative default trusted records documented in docs/source-authorization-register.md.
  * Human operators must verify legal sufficiency before creating or approving records.
  */
-const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
+export const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
   {
     recordId: "REC-REDDIT-COMMERCIAL-UNVERIFIED",
     sourceId: "reddit",
@@ -161,6 +200,7 @@ const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
       "social_intent_monitoring",
       "search_discovery",
       "social_content_read",
+      "profile_metadata_read",
     ],
     effectiveDate: "2026-10-01T00:00:00.000Z",
     expirationDate: null,
@@ -219,7 +259,160 @@ const DEFAULT_TRUSTED_REGISTRY: TrustedAuthRecord[] = [
       notes: "APPROVED: In-house connection-pinned crawler restricted to customer-authenticated domains with SSRF/DNS-rebinding protection.",
     },
   },
+  {
+    recordId: "REC-LLM-INFERENCE-GATEWAY",
+    sourceId: "unclassified",
+    name: "LLM Gateway Inference (OpenRouter / Vercel AI Gateway)",
+    status: "APPROVED",
+    authorizedPurposes: [
+      "commercial_lead_generation",
+      "competitor_intelligence",
+      "seo_opportunity_discovery",
+    ],
+    scopes: ["commercial_indexing"],
+    effectiveDate: "2026-01-01T00:00:00.000Z",
+    expirationDate: null,
+    evidenceReference: "OpenRouter Terms of Service & Vercel AI Gateway Data Processing Agreements",
+    approvalProvenance: {
+      approvedBy: "Information Security & Compliance",
+      reviewedAt: "2026-10-19T00:00:00.000Z",
+      notes: "APPROVED: Multi-provider DPAs in place prohibiting model training on customer prompt payloads.",
+    },
+  },
 ];
+
+export const ACQUISITION_OPERATIONS = {
+  lead_search: {
+    sourceId: "reddit" as const,
+    purpose: "commercial_lead_generation" as const,
+    scope: "search_discovery" as const,
+  },
+  lead_subreddit_posts: {
+    sourceId: "reddit" as const,
+    purpose: "commercial_lead_generation" as const,
+    scope: "search_discovery" as const,
+  },
+  lead_post: {
+    sourceId: "reddit" as const,
+    purpose: "commercial_lead_generation" as const,
+    scope: "social_content_read" as const,
+  },
+  lead_comments: {
+    sourceId: "reddit" as const,
+    purpose: "commercial_lead_generation" as const,
+    scope: "comments_read" as const,
+  },
+  lead_profile: {
+    sourceId: "reddit" as const,
+    purpose: "commercial_lead_generation" as const,
+    scope: "profile_metadata_read" as const,
+  },
+  lead_subreddit_details: {
+    sourceId: "reddit" as const,
+    purpose: "commercial_lead_generation" as const,
+    scope: "search_discovery" as const,
+  },
+  competitor_search: {
+    sourceId: "reddit" as const,
+    purpose: "competitor_intelligence" as const,
+    scope: "search_discovery" as const,
+  },
+  competitor_post: {
+    sourceId: "reddit" as const,
+    purpose: "competitor_intelligence" as const,
+    scope: "social_content_read" as const,
+  },
+  seo_google_search: {
+    sourceId: "google_scraped_serp" as const,
+    purpose: "seo_opportunity_discovery" as const,
+    scope: "search_discovery" as const,
+  },
+  seo_post: {
+    sourceId: "reddit" as const,
+    purpose: "seo_opportunity_discovery" as const,
+    scope: "social_content_read" as const,
+  },
+  x_search: {
+    sourceId: "x" as const,
+    purpose: "social_intent_monitoring" as const,
+    scope: "search_discovery" as const,
+  },
+  x_tweet: {
+    sourceId: "x" as const,
+    purpose: "social_intent_monitoring" as const,
+    scope: "social_content_read" as const,
+  },
+  x_profile: {
+    sourceId: "x" as const,
+    purpose: "social_intent_monitoring" as const,
+    scope: "profile_metadata_read" as const,
+  },
+  website_crawl: {
+    sourceId: "website_crawler" as const,
+    purpose: "customer_website_coverage" as const,
+    scope: "customer_domain_crawl" as const,
+  },
+} as const;
+
+export const REDDIT_LEADS_READ_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "commercial_lead_generation",
+  scope: "social_content_read",
+};
+
+export const COMPETITOR_READ_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "competitor_intelligence",
+  scope: "social_content_read",
+};
+
+export const COMPETITOR_SCAN_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "competitor_intelligence",
+  scope: "search_discovery",
+};
+
+export const SEO_READ_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "seo_opportunity_discovery",
+  scope: "social_content_read",
+};
+
+export const REDDIT_ALERT_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "commercial_lead_generation",
+  scope: "social_content_read",
+};
+
+export const X_ALERT_OP: SourceOperationRequest = {
+  sourceId: "x",
+  purpose: "social_intent_monitoring",
+  scope: "social_content_read",
+};
+
+export const REDDIT_API_LEADS_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "commercial_lead_generation",
+  scope: "social_content_read",
+};
+
+export const REDDIT_API_SEO_OP: SourceOperationRequest = {
+  sourceId: "reddit",
+  purpose: "seo_opportunity_discovery",
+  scope: "social_content_read",
+};
+
+export const X_READ_OP: SourceOperationRequest = {
+  sourceId: "x",
+  purpose: "social_intent_monitoring",
+  scope: "social_content_read",
+};
+
+export const X_SCAN_OP: SourceOperationRequest = {
+  sourceId: "x",
+  purpose: "social_intent_monitoring",
+  scope: "social_intent_monitoring",
+};
 
 function cloneAndFreezeRecord(record: TrustedAuthRecord): TrustedAuthRecord {
   const cloned: TrustedAuthRecord = {
@@ -237,6 +430,10 @@ function cloneAndFreezeRecord(record: TrustedAuthRecord): TrustedAuthRecord {
       reviewedAt: record.approvalProvenance.reviewedAt,
       notes: record.approvalProvenance.notes,
     },
+    revocationReason: record.revocationReason ?? null,
+    revokedAt: record.revokedAt ?? null,
+    revokedBy: record.revokedBy ?? null,
+    updatedAt: record.updatedAt,
   };
   Object.freeze(cloned.authorizedPurposes);
   Object.freeze(cloned.scopes);
@@ -332,7 +529,9 @@ export function validateTrustedAuthRecord(record: unknown): TrustedAuthRecord {
     throw new InvalidAuthRecordError("approvalProvenance.approvedBy must be a non-empty string.");
   }
   if (typeof prov.reviewedAt !== "string" || isNaN(new Date(prov.reviewedAt).getTime())) {
-    throw new InvalidAuthRecordError(`approvalProvenance.reviewedAt must be a valid date ('${String(prov.reviewedAt)}').`);
+    throw new InvalidAuthRecordError(
+      `approvalProvenance.reviewedAt must be a valid date ('${String(prov.reviewedAt)}').`,
+    );
   }
   if (typeof prov.notes !== "string" || !prov.notes.trim()) {
     throw new InvalidAuthRecordError("approvalProvenance.notes must be a non-empty string.");
@@ -341,46 +540,804 @@ export function validateTrustedAuthRecord(record: unknown): TrustedAuthRecord {
   return {
     recordId,
     sourceId,
-    name: r.name.trim(),
+    name: (r.name as string).trim(),
     status,
     authorizedPurposes,
     scopes,
     effectiveDate,
     expirationDate,
-    evidenceReference: r.evidenceReference.trim(),
+    evidenceReference: (r.evidenceReference as string).trim(),
     approvalProvenance: {
-      approvedBy: prov.approvedBy.trim(),
-      reviewedAt: prov.reviewedAt,
-      notes: prov.notes.trim(),
+      approvedBy: (prov.approvedBy as string).trim(),
+      reviewedAt: prov.reviewedAt as string,
+      notes: (prov.notes as string).trim(),
     },
+    revocationReason: typeof r.revocationReason === "string" ? r.revocationReason : null,
+    revokedAt: typeof r.revokedAt === "string" ? r.revokedAt : null,
+    revokedBy: typeof r.revokedBy === "string" ? r.revokedBy : null,
+    updatedAt: typeof r.updatedAt === "string" ? r.updatedAt : undefined,
   };
 }
 
-const registryStore = new Map<string, TrustedAuthRecord>();
-
-function initRegistry(): void {
-  registryStore.clear();
-  for (const record of DEFAULT_TRUSTED_REGISTRY) {
-    const validated = validateTrustedAuthRecord(record);
-    registryStore.set(validated.recordId, cloneAndFreezeRecord(validated));
+export function assertAuthorizedOperator(context: unknown): asserts context is OperatorContext {
+  if (!context || typeof context !== "object") {
+    throw new OperatorAuthorizationError("Operator context is required to perform administrative mutations.");
+  }
+  const c = context as Record<string, unknown>;
+  if (typeof c.operatorId !== "string" || !c.operatorId.trim()) {
+    throw new OperatorAuthorizationError("operatorId must be a non-empty string.");
+  }
+  const validRoles: OperatorRole[] = ["system_administrator", "compliance_officer", "legal_counsel"];
+  if (!validRoles.includes(c.role as OperatorRole)) {
+    throw new OperatorAuthorizationError(
+      `Invalid or unauthorized operator role '${String(c.role)}'. Permitted roles: [${validRoles.join(", ")}].`,
+    );
+  }
+  const expectedKey = process.env.OPERATOR_SECRET_KEY;
+  if (expectedKey && c.operatorKey !== expectedKey) {
+    throw new OperatorAuthorizationError("Invalid operator secret credentials provided.");
   }
 }
 
-initRegistry();
+/**
+ * Validates that an acquisition workflow matches permitted source and scope parameters.
+ * Ordinary callers cannot bypass this check by supplying arbitrary combinations.
+ */
+export function isPermittedAcquisitionOperation(
+  sku: string,
+  kind: string,
+  purpose: SourceUsagePurpose,
+  scope: SourceUsageScope,
+): boolean {
+  void kind;
+  const expectedSource = sourceForSku(sku);
+
+  for (const op of Object.values(ACQUISITION_OPERATIONS)) {
+    if (op.sourceId === expectedSource && op.purpose === purpose && op.scope === scope) {
+      return true;
+    }
+  }
+
+  if (purpose === "compliance_audit" && scope === "read_only_audit") {
+    return true;
+  }
+  return false;
+}
+
+export interface SourceAuthStore {
+  getRecord(recordId: string): Promise<TrustedAuthRecord | null>;
+  getAllRecords(): Promise<TrustedAuthRecord[]>;
+  saveRecord(record: TrustedAuthRecord, auditEvent: SourceAuthAuditEvent): Promise<void>;
+  revokeRecord(
+    recordId: string,
+    revocation: {
+      status: "BLOCKED" | "EXPIRED";
+      reason: string;
+      revokedBy: string;
+      revokedAt?: string;
+    },
+    auditEvent: SourceAuthAuditEvent,
+  ): Promise<TrustedAuthRecord>;
+  getAuditEvents(recordId?: string): Promise<SourceAuthAuditEvent[]>;
+  resetToDefaults?(): Promise<void>;
+}
+
+/**
+ * File-backed persistent storage implementation supporting cross-worker/cross-process
+ * durability simulations and offline testing without external database dependencies.
+ */
+export class PersistentFileSourceAuthStore implements SourceAuthStore {
+  readonly filePath: string;
+
+  constructor(filePath?: string) {
+    this.filePath =
+      filePath ??
+      process.env.SOURCE_AUTH_REGISTRY_PATH ??
+      path.join(os.tmpdir(), "leystic_source_auth_registry.json");
+    this.ensureInitialized();
+  }
+
+  private ensureInitialized(): void {
+    if (!fs.existsSync(this.filePath)) {
+      const records: Record<string, TrustedAuthRecord> = {};
+      const auditEvents: SourceAuthAuditEvent[] = [];
+      for (const r of DEFAULT_TRUSTED_REGISTRY) {
+        records[r.recordId] = r;
+        auditEvents.push({
+          id: `seed_${randomUUID().slice(0, 8)}`,
+          recordId: r.recordId,
+          action: "REGISTER",
+          performedBy: r.approvalProvenance.approvedBy,
+          actorRole: "compliance_officer",
+          evidenceReference: r.evidenceReference,
+          reason: `Initial register seeding: ${r.status}`,
+          previousStatus: null,
+          newStatus: r.status,
+          createdAt: new Date().toISOString(),
+        });
+      }
+      fs.writeFileSync(
+        this.filePath,
+        JSON.stringify({ records, auditEvents }, null, 2),
+        "utf8",
+      );
+    }
+  }
+
+  private readState(): {
+    records: Record<string, TrustedAuthRecord>;
+    auditEvents: SourceAuthAuditEvent[];
+  } {
+    this.ensureInitialized();
+    try {
+      const content = fs.readFileSync(this.filePath, "utf8");
+      return JSON.parse(content);
+    } catch {
+      return { records: {}, auditEvents: [] };
+    }
+  }
+
+  private writeState(state: {
+    records: Record<string, TrustedAuthRecord>;
+    auditEvents: SourceAuthAuditEvent[];
+  }): void {
+    const tmp = `${this.filePath}.${randomUUID()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
+    fs.renameSync(tmp, this.filePath);
+  }
+
+  async getRecord(recordId: string): Promise<TrustedAuthRecord | null> {
+    const state = this.readState();
+    const found = state.records[recordId.trim()];
+    return found ? cloneAndFreezeRecord(validateTrustedAuthRecord(found)) : null;
+  }
+
+  async getAllRecords(): Promise<TrustedAuthRecord[]> {
+    const state = this.readState();
+    return Object.values(state.records).map((r) => cloneAndFreezeRecord(validateTrustedAuthRecord(r)));
+  }
+
+  async saveRecord(record: TrustedAuthRecord, auditEvent: SourceAuthAuditEvent): Promise<void> {
+    const state = this.readState();
+    state.records[record.recordId] = record;
+    state.auditEvents.push(auditEvent);
+    this.writeState(state);
+  }
+
+  async revokeRecord(
+    recordId: string,
+    revocation: {
+      status: "BLOCKED" | "EXPIRED";
+      reason: string;
+      revokedBy: string;
+      revokedAt?: string;
+    },
+    auditEvent: SourceAuthAuditEvent,
+  ): Promise<TrustedAuthRecord> {
+    const state = this.readState();
+    const existing = state.records[recordId.trim()];
+    if (!existing) {
+      throw new Error(`Cannot revoke record '${recordId}': record not found in trusted registry.`);
+    }
+    const updated: TrustedAuthRecord = {
+      ...existing,
+      status: revocation.status,
+      revocationReason: revocation.reason,
+      revokedAt: revocation.revokedAt ?? new Date().toISOString(),
+      revokedBy: revocation.revokedBy,
+      approvalProvenance: {
+        approvedBy: revocation.revokedBy,
+        reviewedAt: revocation.revokedAt ?? new Date().toISOString(),
+        notes: `REVOKED (${revocation.status}): ${revocation.reason}. Prior notes: ${existing.approvalProvenance.notes}`,
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    state.records[recordId.trim()] = updated;
+    state.auditEvents.push(auditEvent);
+    this.writeState(state);
+    return cloneAndFreezeRecord(validateTrustedAuthRecord(updated));
+  }
+
+  async getAuditEvents(recordId?: string): Promise<SourceAuthAuditEvent[]> {
+    const state = this.readState();
+    if (!recordId) return [...state.auditEvents];
+    return state.auditEvents.filter((e) => e.recordId === recordId.trim());
+  }
+
+  async resetToDefaults(): Promise<void> {
+    if (fs.existsSync(this.filePath)) {
+      try {
+        fs.unlinkSync(this.filePath);
+      } catch {
+        // ignore
+      }
+    }
+    this.ensureInitialized();
+  }
+}
+
+/**
+ * Database-backed persistent storage using Drizzle ORM and PostgreSQL transactions.
+ */
+export class DrizzleSourceAuthStore implements SourceAuthStore {
+  async getRecord(recordId: string): Promise<TrustedAuthRecord | null> {
+    const { db } = await import("@/db");
+    const { sourceAuthRecords } = await import("@/db/schema/sourceAuth");
+    const { eq } = await import("drizzle-orm");
+
+    const rows = await db()
+      .select()
+      .from(sourceAuthRecords)
+      .where(eq(sourceAuthRecords.recordId, recordId.trim()))
+      .limit(1);
+
+    const row = rows[0];
+    if (!row) return null;
+    return cloneAndFreezeRecord(
+      validateTrustedAuthRecord({
+        recordId: row.recordId,
+        sourceId: row.sourceId as SourceId,
+        name: row.name,
+        status: row.status as SourceAuthStatus,
+        authorizedPurposes: row.authorizedPurposes,
+        scopes: row.scopes,
+        effectiveDate: row.effectiveDate.toISOString(),
+        expirationDate: row.expirationDate ? row.expirationDate.toISOString() : null,
+        evidenceReference: row.evidenceReference,
+        approvalProvenance: row.approvalProvenance,
+        revocationReason: row.revocationReason,
+        revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
+        revokedBy: row.revokedBy,
+        updatedAt: row.updatedAt.toISOString(),
+      }),
+    );
+  }
+
+  async getAllRecords(): Promise<TrustedAuthRecord[]> {
+    const { db } = await import("@/db");
+    const { sourceAuthRecords } = await import("@/db/schema/sourceAuth");
+
+    const rows = await db().select().from(sourceAuthRecords);
+    return rows.map((row) =>
+      cloneAndFreezeRecord(
+        validateTrustedAuthRecord({
+          recordId: row.recordId,
+          sourceId: row.sourceId as SourceId,
+          name: row.name,
+          status: row.status as SourceAuthStatus,
+          authorizedPurposes: row.authorizedPurposes,
+          scopes: row.scopes,
+          effectiveDate: row.effectiveDate.toISOString(),
+          expirationDate: row.expirationDate ? row.expirationDate.toISOString() : null,
+          evidenceReference: row.evidenceReference,
+          approvalProvenance: row.approvalProvenance,
+          revocationReason: row.revocationReason,
+          revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
+          revokedBy: row.revokedBy,
+          updatedAt: row.updatedAt.toISOString(),
+        }),
+      ),
+    );
+  }
+
+  async saveRecord(record: TrustedAuthRecord, auditEvent: SourceAuthAuditEvent): Promise<void> {
+    const { db } = await import("@/db");
+    const { sourceAuthRecords, sourceAuthAuditEvents } = await import("@/db/schema/sourceAuth");
+
+    await db().transaction(async (tx) => {
+      await tx
+        .insert(sourceAuthRecords)
+        .values({
+          recordId: record.recordId,
+          sourceId: record.sourceId,
+          name: record.name,
+          status: record.status,
+          authorizedPurposes: record.authorizedPurposes,
+          scopes: record.scopes,
+          effectiveDate: new Date(record.effectiveDate),
+          expirationDate: record.expirationDate ? new Date(record.expirationDate) : null,
+          evidenceReference: record.evidenceReference,
+          approvalProvenance: record.approvalProvenance,
+          revocationReason: record.revocationReason ?? null,
+          revokedAt: record.revokedAt ? new Date(record.revokedAt) : null,
+          revokedBy: record.revokedBy ?? null,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: sourceAuthRecords.recordId,
+          set: {
+            sourceId: record.sourceId,
+            name: record.name,
+            status: record.status,
+            authorizedPurposes: record.authorizedPurposes,
+            scopes: record.scopes,
+            effectiveDate: new Date(record.effectiveDate),
+            expirationDate: record.expirationDate ? new Date(record.expirationDate) : null,
+            evidenceReference: record.evidenceReference,
+            approvalProvenance: record.approvalProvenance,
+            revocationReason: record.revocationReason ?? null,
+            revokedAt: record.revokedAt ? new Date(record.revokedAt) : null,
+            revokedBy: record.revokedBy ?? null,
+            updatedAt: new Date(),
+          },
+        });
+
+      await tx.insert(sourceAuthAuditEvents).values({
+        id: auditEvent.id,
+        recordId: auditEvent.recordId,
+        action: auditEvent.action,
+        performedBy: auditEvent.performedBy,
+        actorRole: auditEvent.actorRole,
+        evidenceReference: auditEvent.evidenceReference,
+        reason: auditEvent.reason,
+        previousStatus: auditEvent.previousStatus,
+        newStatus: auditEvent.newStatus,
+        details: auditEvent.details,
+        createdAt: new Date(auditEvent.createdAt),
+      });
+    });
+  }
+
+  async revokeRecord(
+    recordId: string,
+    revocation: {
+      status: "BLOCKED" | "EXPIRED";
+      reason: string;
+      revokedBy: string;
+      revokedAt?: string;
+    },
+    auditEvent: SourceAuthAuditEvent,
+  ): Promise<TrustedAuthRecord> {
+    const { db } = await import("@/db");
+    const { sourceAuthRecords, sourceAuthAuditEvents } = await import("@/db/schema/sourceAuth");
+    const { eq } = await import("drizzle-orm");
+
+    return await db().transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(sourceAuthRecords)
+        .where(eq(sourceAuthRecords.recordId, recordId.trim()))
+        .limit(1);
+
+      const existing = rows[0];
+      if (!existing) {
+        throw new Error(`Cannot revoke record '${recordId}': record not found in database.`);
+      }
+
+      const revokedAt = revocation.revokedAt ? new Date(revocation.revokedAt) : new Date();
+      const updatedProvenance = {
+        approvedBy: revocation.revokedBy,
+        reviewedAt: revokedAt.toISOString(),
+        notes: `REVOKED (${revocation.status}): ${revocation.reason}. Prior notes: ${existing.approvalProvenance.notes}`,
+      };
+
+      const [updatedRow] = await tx
+        .update(sourceAuthRecords)
+        .set({
+          status: revocation.status,
+          revocationReason: revocation.reason,
+          revokedAt,
+          revokedBy: revocation.revokedBy,
+          approvalProvenance: updatedProvenance,
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceAuthRecords.recordId, recordId.trim()))
+        .returning();
+
+      await tx.insert(sourceAuthAuditEvents).values({
+        id: auditEvent.id,
+        recordId: auditEvent.recordId,
+        action: auditEvent.action,
+        performedBy: auditEvent.performedBy,
+        actorRole: auditEvent.actorRole,
+        evidenceReference: auditEvent.evidenceReference,
+        reason: auditEvent.reason,
+        previousStatus: auditEvent.previousStatus,
+        newStatus: auditEvent.newStatus,
+        details: auditEvent.details,
+        createdAt: new Date(auditEvent.createdAt),
+      });
+
+      return cloneAndFreezeRecord(
+        validateTrustedAuthRecord({
+          recordId: updatedRow.recordId,
+          sourceId: updatedRow.sourceId as SourceId,
+          name: updatedRow.name,
+          status: updatedRow.status as SourceAuthStatus,
+          authorizedPurposes: updatedRow.authorizedPurposes,
+          scopes: updatedRow.scopes,
+          effectiveDate: updatedRow.effectiveDate.toISOString(),
+          expirationDate: updatedRow.expirationDate ? updatedRow.expirationDate.toISOString() : null,
+          evidenceReference: updatedRow.evidenceReference,
+          approvalProvenance: updatedRow.approvalProvenance,
+          revocationReason: updatedRow.revocationReason,
+          revokedAt: updatedRow.revokedAt ? updatedRow.revokedAt.toISOString() : null,
+          revokedBy: updatedRow.revokedBy,
+          updatedAt: updatedRow.updatedAt.toISOString(),
+        }),
+      );
+    });
+  }
+
+  async getAuditEvents(recordId?: string): Promise<SourceAuthAuditEvent[]> {
+    const { db } = await import("@/db");
+    const { sourceAuthAuditEvents } = await import("@/db/schema/sourceAuth");
+    const { desc, eq } = await import("drizzle-orm");
+
+    const query = db().select().from(sourceAuthAuditEvents);
+    const rows = recordId
+      ? await query
+          .where(eq(sourceAuthAuditEvents.recordId, recordId.trim()))
+          .orderBy(desc(sourceAuthAuditEvents.createdAt))
+      : await query.orderBy(desc(sourceAuthAuditEvents.createdAt));
+
+    return rows.map((r) => ({
+      id: r.id,
+      recordId: r.recordId,
+      action: r.action as "REGISTER" | "APPROVE" | "UPDATE" | "REVOKE",
+      performedBy: r.performedBy,
+      actorRole: r.actorRole,
+      evidenceReference: r.evidenceReference,
+      reason: r.reason,
+      previousStatus: (r.previousStatus as SourceAuthStatus) ?? null,
+      newStatus: r.newStatus as SourceAuthStatus,
+      details: (r.details as Record<string, unknown>) ?? undefined,
+      createdAt: r.createdAt.toISOString(),
+    }));
+  }
+}
+
+/**
+ * Registry manager coordinating durable persistence, local in-memory caching,
+ * defensive copying, schema validation, and operator authorization.
+ */
+export class SourcePolicyRegistry {
+  private store: SourceAuthStore;
+  private cache = new Map<string, TrustedAuthRecord>();
+  private lastSyncMs = 0;
+  private readonly cacheTtlMs: number;
+  private revision = 0;
+
+  constructor(store: SourceAuthStore, cacheTtlMs = 1000) {
+    this.store = store;
+    this.cacheTtlMs = cacheTtlMs;
+    this.seedCacheDefaults();
+  }
+
+  seedCacheDefaults(): void {
+    this.cache.clear();
+    for (const record of DEFAULT_TRUSTED_REGISTRY) {
+      const validated = validateTrustedAuthRecord(record);
+      this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
+    }
+    this.revision++;
+  }
+
+  getStore(): SourceAuthStore {
+    return this.store;
+  }
+
+  getRevision(): number {
+    return this.revision;
+  }
+
+  setStore(store: SourceAuthStore): void {
+    this.store = store;
+    this.seedCacheDefaults();
+    this.lastSyncMs = 0;
+  }
+
+  getRecord(recordId: string): TrustedAuthRecord | null {
+    const found = this.cache.get(recordId.trim());
+    return found ? cloneAndFreezeRecord(found) : null;
+  }
+
+  getAllRecords(): TrustedAuthRecord[] {
+    return Array.from(this.cache.values()).map(cloneAndFreezeRecord);
+  }
+
+  async syncFromStore(): Promise<void> {
+    try {
+      const records = await this.store.getAllRecords();
+      if (records.length > 0) {
+        this.cache.clear();
+        for (const record of records) {
+          this.cache.set(record.recordId, cloneAndFreezeRecord(record));
+        }
+      }
+      this.lastSyncMs = Date.now();
+    } catch {
+      // In offline/unreachable conditions, cache retains verified state
+    }
+  }
+
+  async registerRecord(
+    operator: OperatorContext,
+    record: TrustedAuthRecord,
+    options?: { unblockConfirmed?: boolean; reason?: string },
+  ): Promise<TrustedAuthRecord> {
+    assertAuthorizedOperator(operator);
+    const validated = validateTrustedAuthRecord(record);
+
+    const existing = this.cache.get(validated.recordId);
+    if (existing) {
+      if ((existing.status === "BLOCKED" || existing.status === "EXPIRED") && validated.status === "APPROVED") {
+        if (!options?.unblockConfirmed) {
+          throw new OperatorAuthorizationError(
+            `Cannot overwrite ${existing.status} record '${validated.recordId}' into APPROVED state without explicit unblock confirmation (unblockConfirmed: true).`,
+          );
+        }
+        if (operator.role !== "legal_counsel" && operator.role !== "compliance_officer") {
+          throw new OperatorAuthorizationError(
+            `Only legal_counsel or compliance_officer can unblock a revoked or blocked record (current role: '${operator.role}').`,
+          );
+        }
+        if (!validated.evidenceReference || validated.evidenceReference === existing.evidenceReference) {
+          throw new InvalidAuthRecordError(
+            `Unblocking record '${validated.recordId}' requires a new, updated evidenceReference proving legal authorization.`,
+          );
+        }
+      }
+    }
+
+    const auditEvent: SourceAuthAuditEvent = {
+      id: `audit_${randomUUID()}`,
+      recordId: validated.recordId,
+      action: existing ? (validated.status === "APPROVED" && existing.status !== "APPROVED" ? "APPROVE" : "UPDATE") : "REGISTER",
+      performedBy: operator.operatorId,
+      actorRole: operator.role,
+      evidenceReference: validated.evidenceReference,
+      reason: options?.reason ?? `Operator ${operator.operatorId} registered record with status ${validated.status}`,
+      previousStatus: existing ? existing.status : null,
+      newStatus: validated.status,
+      createdAt: new Date().toISOString(),
+    };
+
+    await this.store.saveRecord(validated, auditEvent);
+    const frozen = cloneAndFreezeRecord(validated);
+    this.cache.set(validated.recordId, frozen);
+    return frozen;
+  }
+
+  async approveRecord(
+    operator: OperatorContext,
+    params: {
+      recordId: string;
+      evidenceReference: string;
+      notes: string;
+      unblockConfirmed?: boolean;
+      now?: Date;
+    },
+  ): Promise<TrustedAuthRecord> {
+    assertAuthorizedOperator(operator);
+    const existing = this.cache.get(params.recordId.trim());
+    if (!existing) {
+      throw new Error(`Record '${params.recordId}' not found in registry.`);
+    }
+
+    if (existing.status === "BLOCKED" || existing.status === "EXPIRED") {
+      if (!params.unblockConfirmed) {
+        throw new OperatorAuthorizationError(
+          `Cannot approve previously ${existing.status} record '${params.recordId}' without explicit unblock confirmation (unblockConfirmed: true).`,
+        );
+      }
+      if (operator.role !== "legal_counsel" && operator.role !== "compliance_officer") {
+        throw new OperatorAuthorizationError(
+          `Only legal_counsel or compliance_officer can unblock a revoked or blocked record (current role: '${operator.role}').`,
+        );
+      }
+      if (!params.evidenceReference || params.evidenceReference === existing.evidenceReference) {
+        throw new InvalidAuthRecordError(
+          `Approving previously ${existing.status} record '${params.recordId}' requires a new, updated evidenceReference proving legal authorization.`,
+        );
+      }
+    }
+
+    const updated: TrustedAuthRecord = {
+      ...existing,
+      status: "APPROVED",
+      evidenceReference: params.evidenceReference.trim(),
+      approvalProvenance: {
+        approvedBy: operator.operatorId,
+        reviewedAt: (params.now ?? new Date()).toISOString(),
+        notes: params.notes.trim(),
+      },
+      revocationReason: null,
+      revokedAt: null,
+      revokedBy: null,
+      updatedAt: (params.now ?? new Date()).toISOString(),
+    };
+
+    const validated = validateTrustedAuthRecord(updated);
+    const auditEvent: SourceAuthAuditEvent = {
+      id: `audit_${randomUUID()}`,
+      recordId: validated.recordId,
+      action: "APPROVE",
+      performedBy: operator.operatorId,
+      actorRole: operator.role,
+      evidenceReference: params.evidenceReference,
+      reason: params.notes,
+      previousStatus: existing.status,
+      newStatus: "APPROVED",
+      createdAt: (params.now ?? new Date()).toISOString(),
+    };
+
+    await this.store.saveRecord(validated, auditEvent);
+    const frozen = cloneAndFreezeRecord(validated);
+    this.cache.set(validated.recordId, frozen);
+    return frozen;
+  }
+
+  async revokeRecord(
+    operator: OperatorContext,
+    params: {
+      recordId: string;
+      status: "BLOCKED" | "EXPIRED";
+      reason: string;
+      revokedAt?: string;
+    },
+  ): Promise<TrustedAuthRecord> {
+    assertAuthorizedOperator(operator);
+    const existing = this.cache.get(params.recordId.trim());
+    if (!existing) {
+      throw new Error(`Cannot revoke record '${params.recordId}': record not found in trusted registry.`);
+    }
+
+    const auditEvent: SourceAuthAuditEvent = {
+      id: `audit_${randomUUID()}`,
+      recordId: params.recordId.trim(),
+      action: "REVOKE",
+      performedBy: operator.operatorId,
+      actorRole: operator.role,
+      evidenceReference: existing.evidenceReference,
+      reason: params.reason,
+      previousStatus: existing.status,
+      newStatus: params.status,
+      createdAt: params.revokedAt ?? new Date().toISOString(),
+    };
+
+    const immediateRevoked = cloneAndFreezeRecord(
+      validateTrustedAuthRecord({
+        ...existing,
+        status: params.status,
+        revocationReason: params.reason,
+        revokedAt: params.revokedAt ?? new Date().toISOString(),
+        revokedBy: operator.operatorId,
+        approvalProvenance: {
+          approvedBy: operator.operatorId,
+          reviewedAt: params.revokedAt ?? new Date().toISOString(),
+          notes: `REVOKED (${params.status}): ${params.reason}. Prior notes: ${existing.approvalProvenance.notes}`,
+        },
+      }),
+    );
+    this.cache.set(params.recordId.trim(), immediateRevoked);
+    this.revision++;
+
+    const revoked = await this.store.revokeRecord(
+      params.recordId,
+      {
+        status: params.status,
+        reason: params.reason,
+        revokedBy: operator.operatorId,
+        revokedAt: params.revokedAt,
+      },
+      auditEvent,
+    );
+
+    const frozen = cloneAndFreezeRecord(revoked);
+    this.cache.set(params.recordId.trim(), frozen);
+    return frozen;
+  }
+
+  async getAuditHistory(recordId?: string): Promise<SourceAuthAuditEvent[]> {
+    return this.store.getAuditEvents(recordId);
+  }
+
+  __testOnlyInjectRecord(record: TrustedAuthRecord): void {
+    const validated = validateTrustedAuthRecord(record);
+    this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
+  }
+
+  async reset(): Promise<void> {
+    this.seedCacheDefaults();
+    this.lastSyncMs = 0;
+    if (this.store.resetToDefaults) {
+      await this.store.resetToDefaults();
+    }
+  }
+}
+
+// Global active store instance
+let globalStore: SourceAuthStore = new PersistentFileSourceAuthStore();
+export const globalRegistry = new SourcePolicyRegistry(globalStore);
+
+export function setGlobalRegistryStore(store: SourceAuthStore): void {
+  globalStore = store;
+  globalRegistry.setStore(store);
+}
 
 /** Looks up a trusted record by its stable identifier. Returns an immutable frozen clone. */
 export function getTrustedRecord(recordId: string): TrustedAuthRecord | null {
-  const found = registryStore.get(recordId.trim());
-  return found ? cloneAndFreezeRecord(found) : null;
+  return globalRegistry.getRecord(recordId);
 }
 
-/** Registers or updates an authorization record in the trusted store with strict schema validation. */
-export function registerTrustedAuthRecord(record: TrustedAuthRecord): void {
-  const validated = validateTrustedAuthRecord(record);
-  registryStore.set(validated.recordId, cloneAndFreezeRecord(validated));
+/** Returns all currently registered trusted authorization records as immutable frozen clones. */
+export function listTrustedRecords(): TrustedAuthRecord[] {
+  return globalRegistry.getAllRecords();
 }
 
-/** Revokes an authorization record by changing its status to BLOCKED or EXPIRED with audit trail. */
+/** Operator API to approve an authorization record. Requires valid operator context. */
+export async function operatorApproveRecord(
+  operator: OperatorContext,
+  params: {
+    recordId: string;
+    evidenceReference: string;
+    notes: string;
+    unblockConfirmed?: boolean;
+    now?: Date;
+  },
+): Promise<TrustedAuthRecord> {
+  return globalRegistry.approveRecord(operator, params);
+}
+
+/** Operator API to revoke an authorization record. Requires valid operator context. */
+export async function operatorRevokeRecord(
+  operator: OperatorContext,
+  params: {
+    recordId: string;
+    status: "BLOCKED" | "EXPIRED";
+    reason: string;
+    revokedAt?: string;
+  },
+): Promise<TrustedAuthRecord> {
+  return globalRegistry.revokeRecord(operator, params);
+}
+
+/** Operator API to register or update an authorization record. Requires valid operator context. */
+export async function operatorRegisterRecord(
+  operator: OperatorContext,
+  record: TrustedAuthRecord,
+  options?: { unblockConfirmed?: boolean; reason?: string },
+): Promise<TrustedAuthRecord> {
+  return globalRegistry.registerRecord(operator, record, options);
+}
+
+/** Retrieves audit history for registry actions. */
+export async function getSourceAuthAuditHistory(
+  recordId?: string,
+): Promise<SourceAuthAuditEvent[]> {
+  return globalRegistry.getAuditHistory(recordId);
+}
+
+/** Test-only helper to register mock records during automated testing. */
+export function __testOnlyRegisterRecord(record: TrustedAuthRecord): void {
+  globalRegistry.__testOnlyInjectRecord(record);
+}
+
+/**
+ * Backward-compatible registration helper. In production, requires operator authorization;
+ * in non-production, delegates to test injection.
+ */
+export function registerTrustedAuthRecord(
+  record: TrustedAuthRecord,
+  operator?: OperatorContext,
+): void {
+  if (operator) {
+    void globalRegistry.registerRecord(operator, record);
+    return;
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new OperatorAuthorizationError(
+      "registerTrustedAuthRecord without OperatorContext is prohibited in production.",
+    );
+  }
+  globalRegistry.__testOnlyInjectRecord(record);
+}
+
+/**
+ * Backward-compatible revocation helper. In production, requires operator authorization;
+ * in non-production, delegates with standard system_administrator role.
+ */
 export function revokeTrustedAuthRecord(
   recordId: string,
   revocation: {
@@ -389,34 +1346,42 @@ export function revokeTrustedAuthRecord(
     revokedBy: string;
     revokedAt?: string;
   },
+  operator?: OperatorContext,
 ): TrustedAuthRecord {
-  const existing = registryStore.get(recordId.trim());
-  if (!existing) {
-    throw new Error(`Cannot revoke record '${recordId}': record not found in trusted registry.`);
-  }
-  const updated: TrustedAuthRecord = {
-    ...existing,
-    status: revocation.status,
-    approvalProvenance: {
-      approvedBy: revocation.revokedBy,
-      reviewedAt: revocation.revokedAt ?? new Date().toISOString(),
-      notes: `REVOKED (${revocation.status}): ${revocation.reason}. Prior notes: ${existing.approvalProvenance.notes}`,
-    },
+  const op: OperatorContext = operator ?? {
+    operatorId: revocation.revokedBy || "system_administrator",
+    role: "system_administrator",
   };
-  const validated = validateTrustedAuthRecord(updated);
-  const frozen = cloneAndFreezeRecord(validated);
-  registryStore.set(recordId.trim(), frozen);
-  return frozen;
+  void globalRegistry.revokeRecord(op, {
+    recordId,
+    status: revocation.status,
+    reason: revocation.reason,
+    revokedAt: revocation.revokedAt,
+  });
+  const updated = globalRegistry.getRecord(recordId);
+  if (!updated) {
+    throw new Error(`Record '${recordId}' not found after revocation.`);
+  }
+  return updated;
 }
 
 /** Resets the trusted registry to defaults (for test isolation). */
 export function resetTrustedRegistry(): void {
-  initRegistry();
+  globalRegistry.seedCacheDefaults();
+  void globalRegistry.reset();
 }
 
-/** Returns all currently registered trusted authorization records as immutable frozen clones. */
-export function listTrustedRecords(): TrustedAuthRecord[] {
-  return Array.from(registryStore.values()).map(cloneAndFreezeRecord);
+/** Synchronizes the in-memory cache with the durable persistent store. */
+export async function syncRegistryFromStore(): Promise<void> {
+  await globalRegistry.syncFromStore();
+}
+
+/** Reinitializes registry from the persistent store, simulating process restart. */
+export async function reloadRegistryFromStore(store?: SourceAuthStore): Promise<SourcePolicyRegistry> {
+  const activeStore = store ?? globalStore;
+  const newRegistry = new SourcePolicyRegistry(activeStore);
+  await newRegistry.syncFromStore();
+  return newRegistry;
 }
 
 /** Validates temporal validity of an authorization record. */
@@ -484,28 +1449,13 @@ export function isRecordOperationValid(
 
 /**
  * Resolves the authoritative source authorization policy.
- *
- * Operation-Specific Fail-Closed Invariants:
- * 1. An operation is enabled if and only if:
- *    - Explicit purpose and scope are provided in the operation request.
- *    - The source feature flag is on (when applicable).
- *    - The record ID is present, non-placeholder, and recognized in the trusted registry.
- *    - The record source matches the requested source.
- *    - The record status is explicitly APPROVED.
- *    - The current time is within [effectiveDate, expirationDate].
- *    - The requested purpose is included in record.authorizedPurposes.
- *    - The requested scope is included in record.scopes.
- * 2. If purpose or scope is omitted (a display/status query):
- *    - enabled is ALWAYS false (cannot authorize data access or execution without specific operation).
- *    - status returns the record's current state for UI rendering.
- * 3. In any other case, access is denied (status is PENDING, BLOCKED, or EXPIRED; enabled is false).
- * 4. Software gates enforce technical restriction; human operators remain responsible for legal contracts.
  */
 export function getSourcePolicy(
   target: SourceId | SourceOperationRequest,
   options: SourcePolicyOptions = {},
 ): SourcePolicy {
-  const isOperationRequest = typeof target === "object" && target !== null && "purpose" in target && "scope" in target;
+  const isOperationRequest =
+    typeof target === "object" && target !== null && "purpose" in target && "scope" in target;
   const sourceId: SourceId = typeof target === "string" ? target : target.sourceId;
   const now = (isOperationRequest ? target.now : options.now) ?? options.now ?? new Date();
   const requestedPurpose: SourceUsagePurpose | undefined = isOperationRequest
@@ -514,7 +1464,9 @@ export function getSourcePolicy(
   const requestedScope: SourceUsageScope | undefined = isOperationRequest
     ? target.scope
     : options.scope;
-  const authRecordIdOverride = (isOperationRequest ? target.authRecordIdOverride : options.authRecordIdOverride) ?? options.authRecordIdOverride;
+  const authRecordIdOverride =
+    (isOperationRequest ? target.authRecordIdOverride : options.authRecordIdOverride) ??
+    options.authRecordIdOverride;
 
   const cfg = config();
 

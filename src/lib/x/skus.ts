@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { searchRuns } from "@/db/schema";
 import { fetchShared, variantOf, type FetchContext, type SharedResult } from "@/lib/reddit/fetch";
+import { ACQUISITION_OPERATIONS } from "@/lib/sourcePolicy";
 import { assertXHouseDataUnderCap } from "./budget";
 import { PAGE_SIZE } from "./constants";
 import { assertLane } from "./grammar";
@@ -72,6 +73,7 @@ export async function searchPage(
     sort: "Latest",
     variant: variantOf({ since, cursor }),
     maxAgeMs: SEARCH_REUSE_MS,
+    operation: ACQUISITION_OPERATIONS.x_search,
     run: async () => {
       const res = await paced(async () => {
         await houseGuard(ctx);
@@ -114,6 +116,7 @@ export async function fetchTweet(ctx: FetchContext, id: string): Promise<SharedR
     sku: "twitter.tweet",
     normalizedQuery: id,
     maxAgeMs: LOOKUP_REUSE_MS,
+    operation: ACQUISITION_OPERATIONS.x_tweet,
     run: async () => {
       const res = await paced(async () => {
         await houseGuard(ctx);
@@ -146,6 +149,7 @@ export async function fetchProfile(
     sku: "twitter.profile",
     normalizedQuery: handle,
     maxAgeMs: LOOKUP_REUSE_MS,
+    operation: ACQUISITION_OPERATIONS.x_profile,
     run: async () => {
       const res = await paced(async () => {
         await houseGuard(ctx);

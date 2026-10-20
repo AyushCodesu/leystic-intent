@@ -1,6 +1,7 @@
 import type { ProductFacts } from "@/lib/product";
 import type { FetchContext } from "@/lib/reddit/fetch";
 import { fetchAuthorProfile } from "@/lib/reddit/skus";
+import { ACQUISITION_OPERATIONS } from "@/lib/sourcePolicy";
 import type { StoredComment, StoredPost } from "@/lib/reddit/store";
 import { inFlight } from "@/lib/inFlight";
 import { redditScore } from "@/lib/scoring/weights";
@@ -94,7 +95,9 @@ export function commentItem(post: StoredPost, comment: StoredComment): ScorableI
 export async function fetchAvatars(ctx: FetchContext, usernames: string[]): Promise<void> {
   await inFlight([...new Set(usernames.filter(Boolean))], async (username) => {
     try {
-      await fetchAuthorProfile(ctx, username, AUTHOR_MAX_AGE_MS);
+      await fetchAuthorProfile(ctx, username, AUTHOR_MAX_AGE_MS, {
+        operation: ACQUISITION_OPERATIONS.lead_profile,
+      });
     } catch {
       // An avatar is decoration; the lead is already written.
     }

@@ -788,3 +788,85 @@ Explicit Legal Boundary: Software gates enforce technical restrictions, isolate 
 * `git diff --check`: 0 whitespace errors.
 * Typography test (`tests/typography.test.ts`): Passed. No non-ASCII characters or em/en dashes.
 * External Legal Notice: Software gates enforce technical restrictions only; external contracts with data providers remain required.
+
+---
+
+## 18. Durable, Auditable, and Operation-Attributed Source Authorization
+
+**Branch**: `fix/durable-auditable-source-authorization`
+**Baseline Commit**: `5c640a20f0885f7a3b28f86220f2991e2214ee7c`
+
+### 1. Durable PostgreSQL Schema & Migration (`src/db/schema/sourceAuth.ts`)
+* **Tables Created**:
+  * `source_auth_records`: Durable store for authoritative source records (`record_id`, `source_id`, `name`, `status`, `authorized_purposes`, `scopes`, `effective_date`, `expiration_date`, `evidence_reference`, `approval_provenance`, `revocation_reason`, `revoked_at`, `revoked_by`, `created_at`, `updated_at`).
+  * `source_auth_audit_events`: Durable append-only audit trail (`id`, `record_id`, `action`, `performed_by`, `actor_role`, `evidence_reference`, `reason`, `previous_status`, `new_status`, `details`, `created_at`).
+* **Migration `0043_source_authorization_registry.sql`**:
+  * Creates tables and indexes on `source_id`, `status`, and `record_id`.
+  * Seeds baseline records preserving current statuses:
+    * `REC-REDDIT-COMMERCIAL-UNVERIFIED`: status `BLOCKED` (no unearned promotion).
+    * `REC-X-PILOT-REVIEW`: status `PENDING` (`enabled: false`).
+    * `REC-GOOGLE-ANYAPI-SCRAPED`: status `BLOCKED`.
+    * `REC-GOOGLE-OFFICIAL-CSE`: status `BLOCKED` (unconfigured).
+    * `REC-WEBSITE-CRAWLER-FIRST-PARTY`: status `APPROVED` (`customer_domain_crawl`).
+  * Seeds corresponding baseline audit events in `source_auth_audit_events`.
+  * Registered in `drizzle/meta/_journal.json`.
+* **Pluggable Store Abstraction (`SourceAuthStore`)**:
+  * `DrizzleSourceAuthStore`: Transactional database persistence using Drizzle ORM and PostgreSQL transactions.
+  * `PersistentFileSourceAuthStore`: File-backed atomic JSON storage simulating restart durability and offline verification.
+
+### 2. Operator Authorization Boundary and Unblock Protections (`src/lib/sourcePolicy.ts`)
+* **Operator Context**:
+  * Enforces `OperatorContext` (`operatorId`, `role: "system_administrator" | "compliance_officer" | "legal_counsel"`, `operatorKey`).
+  * Mutations without valid `OperatorContext` throw `OperatorAuthorizationError`.
+* **Strict Unblock Protection**:
+  * Prevents accidental or routine overwrites of `BLOCKED` or `EXPIRED` records to `APPROVED`.
+  * Overwriting a blocked/expired record into approved state requires `unblockConfirmed: true`.
+  * Role check: Only `legal_counsel` or `compliance_officer` can unblock; `system_administrator` role is rejected.
+  * Evidence check: Requires a new, distinct `evidenceReference` documenting the updated legal basis; reusing the previous evidence reference is rejected with `InvalidAuthRecordError`.
+* **Synchronous Cache Invalidation & Defensive Immutability**:
+  * Registry operations (`getRecord`, `getAllRecords`) return deep-cloned, frozen objects (`Object.freeze`).
+  * Operator revocations immediately invalidate in-memory cache and increment registry revision so subsequent checks fail closed synchronously without delay or process restart.
+
+### 3. Propagating Consuming Purpose Across Acquisition Seams
+* **`ACQUISITION_OPERATIONS` Controlled Mapping**:
+  * Maps every workflow to its exact required `sourceId`, `purpose`, and `scope`:
+    * `lead_search`, `lead_subreddit_posts`, `lead_post`, `lead_comments`, `lead_profile`, `lead_subreddit_details`: `commercial_lead_generation` with appropriate scopes (`search_discovery`, `social_content_read`, `comments_read`, `profile_metadata_read`).
+    * `competitor_search`, `competitor_post`: `competitor_intelligence` with `search_discovery` or `social_content_read`.
+    * `seo_google_search`, `seo_post`: `seo_opportunity_discovery` with `search_discovery` or `social_content_read`.
+    * `x_search`, `x_tweet`, `x_profile`: `social_intent_monitoring` with `search_discovery`, `social_content_read`, or `profile_metadata_read`.
+    * `website_crawl`: `customer_website_coverage` with `customer_domain_crawl`.
+* **Seam Validation (`src/lib/reddit/fetch.ts:operationForFetch`)**:
+  * Validates purpose and scope against permitted combinations (`isPermittedAcquisitionOperation`).
+  * Missing purpose or scope fails closed with `SourceUnauthorizedError`.
+  * Intermediate fetch callers updated to pass typed operations: `src/lib/reddit/skus.ts`, `src/lib/seo/fetch.ts`, `src/lib/seo/refresh.ts`, `src/lib/competitors/scan.ts`, `src/lib/x/skus.ts`, `src/lib/scan/backfill.ts`, `src/lib/scan/retrieve.ts`, `src/lib/scan/comments.ts`, `src/lib/scan/judging.ts`, `src/lib/scan/run.ts`.
+
+### 4. Truthful Retention API Reporting (`src/lib/retention.ts`)
+* **Separation of Routine TTL Cleanup from Historical Purges**:
+  * Routine 30-day TTL cleanup (`deleteExpiredPosts`) runs automatically in bounded batches (`RETENTION_BATCH = 500`) and preserves posts referenced by active leads, SEO opportunities, and competitor mentions.
+  * Destructive historical bulk purges (`planHistoricalPurge`, `purgeHistoricalData`) require explicit operator approval (`operatorApprovalConfirmed: true`), throwing `OperatorApprovalRequiredError` if unconfirmed.
+  * Execution of historical bulk purges is deferred in code; API responses truthfully report `isImplemented: false` and `status: "deferred_not_implemented"` with 0 rows purged.
+  * `auditRetention()` and `RetentionDryRunPlan` accurately reflect this separation and report deferred status.
+
+### 5. 12 Comprehensive Regression Tests (`tests/sourceAuthorizationGate.test.ts`)
+1. Registry records and revocations survive reinitialization/restart simulations and are shared across independent runtime instances.
+2. Revoked or expired records are immediately denied authorization, even if previously cached.
+3. Unauthorized callers cannot approve, overwrite, or revoke records, and unblock protection prevents promoting blocked records without an explicit operator action and new evidence.
+4. Approval and revocation operations produce complete, durable audit entries.
+5. All sources (Reddit, X, Google SERP, website crawler) remain correctly gated under their current status.
+6. Every production source acquisition passes the correct consuming purpose and scope (`ACQUISITION_OPERATIONS`).
+7. Missing or mismatched operation context fails closed (`operationForFetch`).
+8. Cache and in-flight reuse cannot bypass authorization for a different purpose or scope (`fetchShared`).
+9. Downstream source-data serving (leads, competitors, SEO, alerts) remains inaccessible when authorization is denied.
+10. Historical purge behavior and documentation match actual implementation (`planHistoricalPurge`, `purgeHistoricalData`, `OperatorApprovalRequiredError`).
+11. Routine TTL cleanup still works and preserves existing foreign-key/cascade protections (tested in `describeDb`).
+12. Independent authorized functionality (website crawler) continues working when another source is blocked.
+
+### 6. Verification Results
+* `npm run typecheck`: 0 errors.
+* `npm run lint`: 0 problems (0 errors, 0 warnings).
+* `tests/sourceAuthorizationGate.test.ts`: 12 passed, 3 skipped (db offline).
+* `tests/typography.test.ts`: Passed. 0 non-ASCII or em/en dashes.
+* `npm test`: 83 test files passed (803 passed, 281 skipped), 0 failures.
+* `npm run build`: Production build passed (35 static and dynamic routes compiled).
+* `git diff --check`: 0 whitespace errors.
+* External Legal Notice: Software gates enforce technical restrictions only; external contracts with data providers remain required.

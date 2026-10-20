@@ -1,5 +1,6 @@
 import type { FetchContext } from "@/lib/reddit/fetch";
 import { fetchPost, fetchSearch, fetchSubredditPosts } from "@/lib/reddit/skus";
+import { ACQUISITION_OPERATIONS } from "@/lib/sourcePolicy";
 import type { StoredPost } from "@/lib/reddit/store";
 import { googleSearch } from "@/lib/seo/fetch";
 import { redditThread, type RedditThread } from "@/lib/seo/links";
@@ -89,7 +90,10 @@ async function runSearch(loop: Loop, row: PlanRow, wide: boolean): Promise<void>
   const chosen = timeframeFor(loop, row);
   const timeframe = wide && chosen === "day" ? "week" : chosen;
   try {
-    const result = await fetchSearch(loop.ctx, row.key, { timeframe });
+    const result = await fetchSearch(loop.ctx, row.key, {
+      timeframe,
+      operation: ACQUISITION_OPERATIONS.lead_search,
+    });
     keep(loop, result.value.posts, { kind: "search", key: row.key, rows: [row] });
     loop.covered.push({ row, at: loop.now });
   } catch {
@@ -102,7 +106,10 @@ async function runScoped(loop: Loop, community: PlanRow, query: PlanRow): Promis
   const timeframe = timeframeFor(loop, community);
   const text = scopedQuery(community.key, query.key);
   try {
-    const result = await fetchSearch(loop.ctx, text, { timeframe });
+    const result = await fetchSearch(loop.ctx, text, {
+      timeframe,
+      operation: ACQUISITION_OPERATIONS.lead_search,
+    });
     keep(loop, result.value.posts, { kind: "scoped", key: text, rows: [community, query] });
   } catch {
     loop.gaps.push(`The search of r/${community.key} for "${query.key}" failed.`);
@@ -121,7 +128,10 @@ async function runListing(loop: Loop, row: PlanRow): Promise<void> {
   for (let page = 0; page < loop.pages; page += 1) {
     let value: { posts: StoredPost[]; nextCursor: string | null };
     try {
-      const result = await fetchSubredditPosts(loop.ctx, row.key, cursor ? { cursor } : {});
+      const result = await fetchSubredditPosts(loop.ctx, row.key, {
+        ...(cursor ? { cursor } : {}),
+        operation: ACQUISITION_OPERATIONS.lead_subreddit_posts,
+      });
       value = result.value;
     } catch {
       loop.gaps.push(`Reading r/${row.key} failed on page ${page + 1}.`);
@@ -185,7 +195,11 @@ async function runSerp(loop: Loop, row: PlanRow, budget: number): Promise<number
   }
   await inFlight(opening, async (thread) => {
     try {
-      const post = (await fetchPost(loop.ctx, thread.canonicalUrl, loop.ctx.maxAgeMs)).value[0];
+      const post = (
+        await fetchPost(loop.ctx, thread.canonicalUrl, loop.ctx.maxAgeMs, {
+          operation: ACQUISITION_OPERATIONS.lead_post,
+        })
+      ).value[0];
       if (post) {
         keep(loop, [post], source);
       }

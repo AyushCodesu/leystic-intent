@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { redditPosts } from "@/db/schema";
 import type { FetchContext } from "@/lib/reddit/fetch";
 import { fetchPostComments } from "@/lib/reddit/skus";
+import { ACQUISITION_OPERATIONS } from "@/lib/sourcePolicy";
 import { commentsOfPosts, type StoredComment, type StoredPost } from "@/lib/reddit/store";
 import { inFlight } from "@/lib/inFlight";
 import {
@@ -34,7 +35,9 @@ export type ThreadRead = { post: StoredPost; comments: StoredComment[] };
 async function readThreads(ctx: FetchContext, posts: StoredPost[]): Promise<ThreadRead[]> {
   const reads = await inFlight(posts, async (post): Promise<ThreadRead | null> => {
     try {
-      const result = await fetchPostComments(ctx, post.id, post.url);
+      const result = await fetchPostComments(ctx, post.id, post.url, {
+        operation: ACQUISITION_OPERATIONS.lead_comments,
+      });
       await db()
         .update(redditPosts)
         .set({ commentsReadCount: post.numComments ?? 0 })
