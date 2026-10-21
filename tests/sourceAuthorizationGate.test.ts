@@ -21,6 +21,7 @@ import {
   getSourceAuthAuditHistory,
   getSourcePolicy,
   getTrustedRecord,
+  globalOperatorCredentialRegistry,
   globalRegistry,
   InvalidAuthRecordError,
   isPermittedAcquisitionOperation,
@@ -40,34 +41,40 @@ import {
   type OperatorRole,
   type SourceOperationRequest,
   type TrustedAuthRecord,
+  __testOnlyRegisterOperatorCredential,
 } from "@/lib/sourcePolicy";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 const legalOperator: OperatorContext = {
   operatorId: "legal_counsel_001",
   role: "legal_counsel",
+  operatorKey: "legal_secret_key_001",
 };
 
 const complianceOperator: OperatorContext = {
   operatorId: "compliance_officer_001",
   role: "compliance_officer",
+  operatorKey: "compliance_secret_key_001",
 };
 
 const adminOperator: OperatorContext = {
   operatorId: "sysadmin_001",
   role: "system_administrator",
+  operatorKey: "admin_secret_key_001",
 };
 
 describe("Operation-Specific Source Authorization and Registry Controls", () => {
   beforeEach(() => {
     vi.stubEnv("DATABASE_URL", "postgres://reddit_leads@localhost:5433/reddit_leads");
     vi.stubEnv("APP_ENCRYPTION_KEY", Buffer.alloc(32).toString("base64"));
+    globalOperatorCredentialRegistry.reset();
     setGlobalRegistryStore(createDefaultSourceAuthStore());
     resetTrustedRegistry();
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    globalOperatorCredentialRegistry.reset();
     setGlobalRegistryStore(createDefaultSourceAuthStore());
     resetTrustedRegistry();
   });
@@ -433,17 +440,34 @@ describe("Operation-Specific Source Authorization and Registry Controls", () => 
 
   // Test 8: A valid operation mapping cannot authorize a different workflow
   it("Test 8: A valid operation mapping cannot authorize a different workflow", () => {
-    // reddit.post or a post fetch using lead_search fails closed
+    // Missing explicit operationId fails closed
     expect(() =>
       operationForFetch({
-        sku: "reddit.post",
-        kind: "post",
+        sku: "reddit.search",
+        kind: "keyword",
+      }),
+    ).toThrow(SourceUnauthorizedError);
+
+    // Unknown operationId fails closed
+    expect(() =>
+      operationForFetch({
+        sku: "reddit.search",
+        kind: "keyword",
         operation: {
-          operationId: "lead_search",
+          operationId: "nonexistent_op" as unknown as SourceOperationRequest["operationId"],
           sourceId: "reddit",
           purpose: "commercial_lead_generation",
           scope: "search_discovery",
         },
+      }),
+    ).toThrow(SourceUnauthorizedError);
+
+    // Mismatched SKU or kind for operationId fails closed
+    expect(() =>
+      operationForFetch({
+        sku: "reddit.post",
+        kind: "post",
+        operation: ACQUISITION_OPERATIONS.lead_search,
       }),
     ).toThrow(SourceUnauthorizedError);
 
@@ -452,26 +476,128 @@ describe("Operation-Specific Source Authorization and Registry Controls", () => 
       operationForFetch({
         sku: "reddit.search",
         kind: "keyword",
-        operation: {
-          operationId: "lead_search",
-          sourceId: "reddit",
-          purpose: "competitor_intelligence",
-          scope: "social_content_read",
-        },
+        purpose: "competitor_intelligence",
+        operation: ACQUISITION_OPERATIONS.lead_search,
       }),
     ).toThrow(SourceUnauthorizedError);
 
-    // Missing operation context fails closed
     expect(() =>
       operationForFetch({
         sku: "reddit.search",
         kind: "keyword",
+        scope: "social_content_read",
+        operation: ACQUISITION_OPERATIONS.lead_search,
       }),
     ).toThrow(SourceUnauthorizedError);
+
+    // Exact valid mapping succeeds with all 5 dimensions matching
+    const valid = operationForFetch({
+      sku: "reddit.search",
+      kind: "keyword",
+      operation: ACQUISITION_OPERATIONS.lead_search,
+    });
+    expect(valid.operationId).toBe("lead_search");
+    expect(valid.sourceId).toBe("reddit");
+    expect(valid.purpose).toBe("commercial_lead_generation");
+    expect(valid.scope).toBe("search_discovery");
 
     // Unknown SKU fails closed
     expect(() => sourceForSku("unknown.provider.sku")).toThrow(SourceUnauthorizedError);
     expect(() => sourceForSku("bing.search")).toThrow(SourceUnauthorizedError);
+  });
+
+  // Test 8B: Operator authentication enforces server-side credentials and rejects caller role assertions
+  it("Test 8B: Operator authentication enforces server-side credentials and rejects caller role assertions", async () => {
+    const unblockCandidate: TrustedAuthRecord = {
+      recordId: "REC-REDDIT-COMMERCIAL-UNVERIFIED",
+      sourceId: "reddit",
+      name: "Reddit (via AnyAPI Gateway)",
+      status: "APPROVED",
+      authorizedPurposes: ["commercial_lead_generation"],
+      scopes: ["search_discovery"],
+      effectiveDate: "2026-10-01T00:00:00.000Z",
+      expirationDate: null,
+      evidenceReference: "NEW-OFFICIAL-DIRECT-AGREEMENT-2026",
+      approvalProvenance: {
+        approvedBy: "legal_counsel_001",
+        reviewedAt: "2026-10-20T00:00:00.000Z",
+        notes: "Direct verified agreement executed",
+      },
+    };
+
+    // Caller cannot elevate role: sysadmin credential claiming legal_counsel is rejected
+    await expect(
+      operatorRegisterRecord(
+        {
+          operatorId: "sysadmin_001",
+          role: "legal_counsel",
+          operatorKey: "admin_secret_key_001",
+        },
+        unblockCandidate,
+        { unblockConfirmed: true },
+      ),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    // Unknown credential token is rejected
+    await expect(
+      operatorRegisterRecord(
+        {
+          operatorId: "legal_counsel_001",
+          role: "legal_counsel",
+          operatorKey: "unregistered_token_xyz",
+        },
+        unblockCandidate,
+        { unblockConfirmed: true },
+      ),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    // Revoked credential is rejected
+    __testOnlyRegisterOperatorCredential({
+      credentialId: "cred_revoked_counsel",
+      operatorId: "revoked_counsel_001",
+      role: "legal_counsel",
+      secret: "revoked_token_123",
+      revoked: true,
+    });
+    await expect(
+      operatorRegisterRecord(
+        {
+          operatorId: "revoked_counsel_001",
+          role: "legal_counsel",
+          operatorKey: "revoked_token_123",
+        },
+        unblockCandidate,
+        { unblockConfirmed: true },
+      ),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    // Expired credential is rejected
+    __testOnlyRegisterOperatorCredential({
+      credentialId: "cred_expired_counsel",
+      operatorId: "expired_counsel_001",
+      role: "legal_counsel",
+      secret: "expired_token_123",
+      expiresAt: "2020-01-01T00:00:00.000Z",
+    });
+    await expect(
+      operatorRegisterRecord(
+        {
+          operatorId: "expired_counsel_001",
+          role: "legal_counsel",
+          operatorKey: "expired_token_123",
+        },
+        unblockCandidate,
+        { unblockConfirmed: true },
+      ),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    // In production, missing OPERATOR_SECRET_KEY disables mutations fail-closed
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("OPERATOR_SECRET_KEY", "");
+    await expect(
+      operatorRegisterRecord(legalOperator, unblockCandidate, { unblockConfirmed: true }),
+    ).rejects.toThrow(OperatorAuthorizationError);
+    vi.unstubAllEnvs();
   });
 
   // Test 9: Cache reuse cannot bypass a new operation's purpose or scope requirements
@@ -785,5 +911,66 @@ describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
     expect(outcome.read).toBe(0);
     expect(outcome.mentions).toBe(0);
     expect(outcome.costUsd).toBe(0);
+  });
+
+  it("enforces cross-worker revocation consistency across two DrizzleSourceAuthStore instances", async () => {
+    const storeA = new DrizzleSourceAuthStore();
+    const registryA = new SourcePolicyRegistry(storeA, 100);
+    const storeB = new DrizzleSourceAuthStore();
+    const registryB = new SourcePolicyRegistry(storeB, 100);
+
+    const testRecordId = `REC-TEST-MULTIWORKER-${randomUUID().slice(0, 8)}`;
+    const testRecord: TrustedAuthRecord = {
+      recordId: testRecordId,
+      sourceId: "reddit",
+      name: "Multi-Worker Invalidation Record",
+      status: "APPROVED",
+      authorizedPurposes: ["commercial_lead_generation"],
+      scopes: ["search_discovery"],
+      effectiveDate: "2026-01-01T00:00:00.000Z",
+      expirationDate: null,
+      evidenceReference: "CONTRACT-CROSS-WORKER-001",
+      approvalProvenance: {
+        approvedBy: legalOperator.operatorId ?? "legal_counsel_001",
+        reviewedAt: new Date().toISOString(),
+        notes: "Approved for cross-worker test",
+      },
+    };
+
+    // Worker A registers and approves fixture
+    await registryA.registerRecord(legalOperator, testRecord);
+
+    // Worker B hydrates and sees APPROVED state
+    await registryB.syncFromStore();
+    const recordOnB = registryB.getRecord(testRecordId);
+    expect(recordOnB?.status).toBe("APPROVED");
+
+    // Worker A revokes the record
+    await registryA.revokeRecord(complianceOperator, {
+      recordId: testRecordId,
+      status: "BLOCKED",
+      reason: "Cross-worker revocation consistency test",
+    });
+
+    // Worker B must observe revocation within consistency guarantee
+    await registryB.ensureFresh();
+    const revokedOnB = registryB.getRecord(testRecordId);
+    expect(revokedOnB?.status).toBe("BLOCKED");
+    expect(revokedOnB?.revocationReason).toBe("Cross-worker revocation consistency test");
+  });
+
+  it("strictly enforces database-level append-only immutability and blocks TRUNCATE on audit events", async () => {
+    const { db } = await import("@/db");
+    const { sql } = await import("drizzle-orm");
+
+    // Attempting to truncate source_auth_audit_events must be blocked by trigger / permissions
+    await expect(
+      db().execute(sql`TRUNCATE TABLE "source_auth_audit_events";`),
+    ).rejects.toThrow();
+
+    // Attempting to delete from source_auth_audit_events must be blocked by row-level trigger
+    await expect(
+      db().execute(sql`DELETE FROM "source_auth_audit_events";`),
+    ).rejects.toThrow();
   });
 });

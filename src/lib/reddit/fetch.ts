@@ -9,7 +9,6 @@ import {
   assertSourceAuthorized,
   ensureSourcePolicyFresh,
   findAcquisitionOperation,
-  isPermittedAcquisitionOperation,
   sourceForSku,
   SourceUnauthorizedError,
   type SourceOperationRequest,
@@ -62,61 +61,102 @@ export function operationForFetch(input: {
   scope?: SourceUsageScope;
 }): SourceOperationRequest {
   const sourceId = sourceForSku(input.sku);
-  const purpose = input.operation?.purpose ?? input.purpose;
-  const scope = input.operation?.scope ?? input.scope;
+  const operationId = input.operation?.operationId;
 
-  if (!purpose || !scope) {
+  if (!operationId) {
     throw new SourceUnauthorizedError(
       sourceId,
-      `Operation context required: missing explicit purpose or scope for acquisition SKU '${input.sku}' (kind: '${input.kind}').`,
+      `Missing explicit operationId for acquisition SKU '${input.sku}' (kind: '${input.kind}'). Explicit operation identity is mandatory.`,
       "BLOCKED",
     );
   }
 
-  const operationId = input.operation?.operationId;
-  if (operationId) {
-    const def = ACQUISITION_OPERATIONS[operationId];
-    if (!def) {
-      throw new SourceUnauthorizedError(
-        sourceId,
-        `Unknown operationId '${operationId}' for acquisition SKU '${input.sku}'.`,
-        "BLOCKED",
-      );
-    }
-    if (
-      def.sku !== input.sku ||
-      def.kind !== input.kind ||
-      def.purpose !== purpose ||
-      def.scope !== scope ||
-      def.sourceId !== sourceId
-    ) {
-      throw new SourceUnauthorizedError(
-        sourceId,
-        `Mismatched operation context for operationId '${operationId}': expected SKU '${def.sku}', kind '${def.kind}', purpose '${def.purpose}', scope '${def.scope}', got SKU '${input.sku}', kind '${input.kind}', purpose '${purpose}', scope '${scope}'.`,
-        "BLOCKED",
-      );
-    }
-  } else {
-    if (!isPermittedAcquisitionOperation(input.sku, input.kind, purpose, scope)) {
-      throw new SourceUnauthorizedError(
-        sourceId,
-        `Unpermitted operation context for SKU '${input.sku}': purpose '${purpose}' with scope '${scope}' (kind: '${input.kind}') is not an authorized acquisition path.`,
-        "BLOCKED",
-      );
-    }
+  const def = ACQUISITION_OPERATIONS[operationId];
+  if (!def) {
+    throw new SourceUnauthorizedError(
+      sourceId,
+      `Unknown operationId '${operationId}' for acquisition SKU '${input.sku}'.`,
+      "BLOCKED",
+    );
   }
 
-  const resolvedOp = operationId
-    ? ACQUISITION_OPERATIONS[operationId]
-    : findAcquisitionOperation(input.sku, input.kind, purpose, scope);
+  // Reject caller attempts to override purpose or scope
+  if (input.purpose && input.purpose !== def.purpose) {
+    throw new SourceUnauthorizedError(
+      sourceId,
+      `Caller cannot override purpose for operation '${operationId}': requested '${input.purpose}', expected '${def.purpose}'.`,
+      "BLOCKED",
+    );
+  }
+  if (input.operation?.purpose && input.operation.purpose !== def.purpose) {
+    throw new SourceUnauthorizedError(
+      sourceId,
+      `Caller cannot override purpose for operation '${operationId}': requested '${input.operation.purpose}', expected '${def.purpose}'.`,
+      "BLOCKED",
+    );
+  }
+  if (input.scope && input.scope !== def.scope) {
+    throw new SourceUnauthorizedError(
+      sourceId,
+      `Caller cannot override scope for operation '${operationId}': requested '${input.scope}', expected '${def.scope}'.`,
+      "BLOCKED",
+    );
+  }
+  if (input.operation?.scope && input.operation.scope !== def.scope) {
+    throw new SourceUnauthorizedError(
+      sourceId,
+      `Caller cannot override scope for operation '${operationId}': requested '${input.operation.scope}', expected '${def.scope}'.`,
+      "BLOCKED",
+    );
+  }
+
+  // Validate that all dimensions align: operationId, sourceId, sku, kind, purpose, and scope
+  if (
+    def.sourceId !== sourceId ||
+    def.sku !== input.sku ||
+    def.kind !== input.kind
+  ) {
+    throw new SourceUnauthorizedError(
+      sourceId,
+      `Mismatched operation context for operationId '${operationId}': expected SKU '${def.sku}', kind '${def.kind}', source '${def.sourceId}', got SKU '${input.sku}', kind '${input.kind}', source '${sourceId}'.`,
+      "BLOCKED",
+    );
+  }
 
   return {
-    operationId: resolvedOp?.operationId,
-    sourceId,
-    purpose,
-    scope,
+    operationId: def.operationId,
+    sourceId: def.sourceId,
+    purpose: def.purpose,
+    scope: def.scope,
     now: input.operation?.now,
     authRecordIdOverride: input.operation?.authRecordIdOverride,
+  };
+}
+
+/** Test-only helper to isolate legacy operation inference for compatibility tests. Throws in production. */
+export function __testOnlyInferOperationForFetch(input: {
+  sku: string;
+  kind: FetchKind;
+  purpose: SourceUsagePurpose;
+  scope: SourceUsageScope;
+}): SourceOperationRequest {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("__testOnlyInferOperationForFetch cannot be called in production.");
+  }
+  const sourceId = sourceForSku(input.sku);
+  const def = findAcquisitionOperation(input.sku, input.kind, input.purpose, input.scope);
+  if (!def) {
+    throw new SourceUnauthorizedError(
+      sourceId,
+      `No registered operation for SKU '${input.sku}', kind '${input.kind}', purpose '${input.purpose}', scope '${input.scope}'.`,
+      "BLOCKED",
+    );
+  }
+  return {
+    operationId: def.operationId,
+    sourceId: def.sourceId,
+    purpose: def.purpose,
+    scope: def.scope,
   };
 }
 

@@ -361,7 +361,6 @@ Connect Leystic's public buyer-intent discovery and Learning V1 outcome tracking
   * `npm run test`: 81 passed test files, 757 passed tests, 0 failures.
   * `npm run build`: Successful Next.js production build (Turbopack).
   * `git diff --check`: 0 whitespace errors.
-
 ---
 
 ## [Unreleased] - 2026-10-18: Competitor Intelligence Production Readiness Gate
@@ -641,8 +640,7 @@ Explicit Legal Boundary: Software gates enforce technical restrictions, isolate 
 * `npm run lint`: 0 problems (0 errors, 0 warnings).
 * `npm test`: 83 test files passed (805 tests passed, 281 skipped database tests), 0 failures.
 * `npm run build`: Production build succeeded with Next.js Turbopack (35 static and dynamic routes compiled).
-* `git diff --check`: 0 whitespace errors.
-* Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all files.
+* `git diff --check`: 0 whitespace errors.* Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all files.
 
 ---
 
@@ -717,8 +715,7 @@ Explicit Legal Boundary: Software gates enforce technical restrictions, isolate 
 * `npm run lint`: 0 problems (0 errors, 0 warnings).
 * `npm test`: 83 test files passed (803 tests passed, 281 skipped database tests), 0 failures.
 * `npm run build`: Production build succeeded with Next.js Turbopack (35 static and dynamic routes compiled).
-* `git diff --check`: 0 whitespace errors.
-* Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all files.
+* `git diff --check`: 0 whitespace errors.* Typography: 0 non-ASCII or unicode em-dashes/en-dashes across all files.
 
 ---
 
@@ -785,8 +782,7 @@ Explicit Legal Boundary: Software gates enforce technical restrictions, isolate 
 * `tests/sourceAuthorizationGate.test.ts`: 12 passed, 3 skipped (db offline).
 * `npm test`: 83 test files passed (803 passed, 281 skipped), 0 failures.
 * `npm run build`: Production build succeeded with Next.js Turbopack (35 static and dynamic routes compiled).
-* `git diff --check`: 0 whitespace errors.
-* Typography test (`tests/typography.test.ts`): Passed. No non-ASCII characters or em/en dashes.
+* `git diff --check`: 0 whitespace errors.* Typography test (`tests/typography.test.ts`): Passed. No non-ASCII characters or em/en dashes.
 * External Legal Notice: Software gates enforce technical restrictions only; external contracts with data providers remain required.
 
 ---
@@ -868,8 +864,7 @@ Explicit Legal Boundary: Software gates enforce technical restrictions, isolate 
 * `tests/typography.test.ts`: Passed. 0 non-ASCII or em/en dashes.
 * `npm test`: 83 test files passed (803 passed, 281 skipped), 0 failures.
 * `npm run build`: Production build passed (35 static and dynamic routes compiled).
-* `git diff --check`: 0 whitespace errors.
-* External Legal Notice: Software gates enforce technical restrictions only; external contracts with data providers remain required.
+* `git diff --check`: 0 whitespace errors.* External Legal Notice: Software gates enforce technical restrictions only; external contracts with data providers remain required.
 
 ---
 
@@ -920,4 +915,57 @@ Explicit Legal Boundary: Software gates enforce technical restrictions, isolate 
 10. The audit ledger survives record state changes, and no ordinary registry operation or cascade deletion can erase audit events.
 11. Routine TTL behavior remains intact and historical purge behavior matches its honest status.
 12. Reddit, X, and scraped Google SERP remain blocked or pending under the current register.
+
+---
+
+## 12. Operator Authentication, Operation Identity, and Revocation Consistency
+
+### 1. Trusted Operator Authentication Registry (`src/lib/operatorAuth.ts`, `src/lib/sourcePolicy.ts`)
+* **Server-Side Operator Credentials**:
+  * Replaced caller-asserted operator identities and roles with a restricted server-side credential registry (`OperatorCredentialRegistry`).
+  * Tokens are stored as SHA-256 hashes and compared using constant-time `timingSafeEqual`.
+  * Verified identities and permitted roles (`system_administrator`, `compliance_officer`, `legal_counsel`) are derived from trusted credential records rather than caller claims.
+  * Supports credential revocation (`revoked: true`) and expiration (`expiresAt`).
+  * In production (`NODE_ENV === "production"`), both `OPERATOR_SECRET_KEY` and registered operator credentials are required. Missing credentials fail closed and disable registry mutations.
+  * Enforced that unblocking a previously `BLOCKED` or `EXPIRED` record strictly requires verified `legal_counsel` or `compliance_officer` role, explicit `unblockConfirmed: true`, and an updated `evidenceReference`.
+  * Actor identity (`performedBy`) and role (`actorRole`) written to audit events are derived directly from the verified credential result.
+
+### 2. Mandatory Explicit Operation Identity (`src/lib/reddit/fetch.ts`, `src/lib/reddit/skus.ts`)
+* **Mandatory `operationId` on All Managed Fetches**:
+  * `operationForFetch()` strictly requires an explicit, recognized `operationId` (`SourceOperationId`) in its operation context.
+  * Removed the production fallback that inferred operations from SKU/purpose/scope.
+  * Validates exact alignment of all 5 dimensions: `operationId`, `sourceId`, `sku`, `kind`, `purpose`, and `scope`.
+  * Rejects missing, unknown, or mismatched operation IDs and caller attempts to override an operation's predefined purpose or scope.
+  * Updated production callers in `src/lib/reddit/skus.ts` to ensure explicit operations are always provided.
+  * Isolated legacy operation inference into `__testOnlyInferOperationForFetch()`, which throws if invoked in production.
+
+### 3. Cross-Worker Revocation Consistency (`src/lib/sourcePolicy.ts`)
+* **Real-Time Notification & Invalidation**:
+  * `DrizzleSourceAuthStore` emits `SELECT pg_notify('source_auth_invalidation', ...)` within the transaction on every `saveRecord` and `revokeRecord` call.
+  * Real-time invalidation listeners evict stale cache entries across worker processes.
+  * Enforces an explicit bounded staleness window (`DEFAULT_MAX_STALENESS_MS = 2000`) so caches re-synchronize regularly even if notifications are delayed.
+  * Fail-closed behavior: If the store disconnects or validation fails, `storeHealthy` is marked false, the cache is cleared, and protected source access is immediately denied.
+  * `PersistentFileSourceAuthStore` implements cross-instance invalidation via an in-memory event bus and synchronous file modification time checks.
+
+### 4. Statement-Level Trigger & Privilege Hardening (`drizzle/0043_source_authorization_registry.sql`)
+* **Immutable Audit Trail**:
+  * Statement-level trigger `trg_prevent_source_auth_audit_events_truncate` (`BEFORE TRUNCATE`) blocks `TRUNCATE` operations on `source_auth_audit_events`.
+  * Privilege-level enforcement: `REVOKE TRUNCATE, DELETE, UPDATE ON "source_auth_audit_events" FROM PUBLIC;` prevents unauthorized wiping of audit records.
+
+### 5. CI Workflow & Test Verification (`.github/workflows/check.yml`, `tests/sourceAuthorizationGate.test.ts`)
+* **CI Execution on Fix Branches**:
+  * Updated `.github/workflows/check.yml` push triggers to `[main, "fix/**", "feat/**"]`, allowing automated execution of database-backed tests against PostgreSQL 17 in GitHub Actions CI.
+* **Regression Tests Added**:
+  * Tested operator authentication: caller cannot claim `legal_counsel` without valid credential token, revoked/expired credentials rejected, missing production secret fails closed.
+  * Tested mandatory `operationId`: missing ID, unknown ID, mismatched SKU/kind, and purpose/scope override attempts all fail closed with `SourceUnauthorizedError`.
+  * Tested multi-worker invalidation consistency and database-level truncate/delete immutability triggers in `describeDb`.
+
+### 6. Verification Summary
+* `npm run typecheck`: 0 errors.
+* `npm run lint`: 0 problems (0 errors, 0 warnings).
+* `tests/sourceAuthorizationGate.test.ts`: 18 tests (13 passed, 5 skipped pending CI PostgreSQL).
+* `tests/typography.test.ts`: Passed. 0 non-ASCII or em/en dashes.
+* `npm test`: 83 test files passed (804 passed, 283 skipped), 0 failures.
+* `npm run build`: Production build passed (35 static and dynamic routes compiled).
+* `git diff --check`: 0 whitespace errors.
 

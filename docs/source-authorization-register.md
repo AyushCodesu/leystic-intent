@@ -320,10 +320,37 @@ To ensure software cannot inadvertently violate authorization boundaries, the re
    * X read queries (`src/lib/x/read.ts`) and alerts (`src/lib/alerts/leads.ts:newXLeadsSince`) return empty results when X is unauthorized.
    * UI pages (`src/app/app/x/page.tsx`, `src/app/app/sources/page.tsx`) display explicit, amber disabled-state banners explaining current authorization status instead of misleading empty sets.
    * Public API endpoints (`src/lib/api/handlers.ts`) reject requests for unauthorized sources with typed error `source_disabled` (HTTP 403).
-   * Alert channels suppress unauthorized source excerpts from being broadcast to Slack, Discord, or Email.
-   * Feeds (`src/lib/leads.ts`), competitor reads (`src/lib/competitors/read.ts`), and SEO reads (`src/lib/seo/read.ts`) return empty results and display clear, non-misleading disabled-state notifications rather than pretending searches were performed and yielded zero results.
-   * Public API endpoints (`src/lib/api/handlers.ts`) reject requests for unauthorized sources with typed error `source_disabled` (HTTP 403).
    * Alert channels (`src/lib/alerts/leads.ts`) suppress unauthorized source excerpts from being broadcast to Slack, Discord, or Email.
+
+### 4.1 Operator Authentication, Operation Identity, and Revocation Consistency
+
+1. **Restricted Server-Side Operator Credential Registry (`src/lib/operatorAuth.ts`)**:
+   * Administrative mutations (`operatorRegisterRecord`, `operatorApproveRecord`, `operatorRevokeRecord`) require verification through `verifyOperatorCredentials`.
+   * Caller-supplied `operatorId` and `role` strings are never trusted on their own. Identity and allowed roles (`system_administrator`, `compliance_officer`, `legal_counsel`) are resolved strictly from server-side registered credentials.
+   * Credentials store SHA-256 hashes of secrets compared using constant-time `timingSafeEqual`.
+   * Supports credential revocation (`revoked: true`) and expiration (`expiresAt`).
+   * In production (`NODE_ENV === "production"`), mutations require both a configured `OPERATOR_SECRET_KEY` and registered operator credentials. Unconfigured environments fail closed.
+   * Unblocking a previously `BLOCKED` or `EXPIRED` record strictly requires verified `legal_counsel` or `compliance_officer` role, explicit `unblockConfirmed: true`, and an updated `evidenceReference`.
+   * Actor identity and role in append-only audit events are derived directly from the verified credential result.
+
+2. **Mandatory Explicit Operation Identity (`src/lib/reddit/fetch.ts`)**:
+   * Every managed acquisition through `fetchShared()` requires an explicit, recognized `operationId` (`SourceOperationId`) in its operation context.
+   * Production inference fallbacks have been removed.
+   * `operationForFetch()` validates exact alignment across all 5 dimensions: `operationId`, `sourceId`, `sku`, `kind`, `purpose`, and `scope`.
+   * Attempts by callers to override an operation's purpose or scope are rejected immediately.
+   * Legacy inference is isolated to `__testOnlyInferOperationForFetch()`, which throws in production.
+
+3. **Cross-Worker Revocation Consistency**:
+   * PostgreSQL real-time invalidation: `DrizzleSourceAuthStore` emits `SELECT pg_notify('source_auth_invalidation', ...)` inside the mutation transaction.
+   * Invalidation listeners immediately evict stale cache entries across worker processes.
+   * Bounded staleness window: `DEFAULT_MAX_STALENESS_MS = 2000` enforces regular re-hydration on all read paths even if notifications are delayed.
+   * Fail-closed on failure: If the durable store is disconnected or fails validation, `storeHealthy` is marked false, cache is cleared, and all protected calls are blocked fail-closed.
+   * In-memory/file simulations: `PersistentFileSourceAuthStore` coordinates cross-instance invalidation via a shared event bus and synchronous file modification time checks.
+
+4. **Immutable Audit Ledger & Truncate Guard (`drizzle/0043_source_authorization_registry.sql`)**:
+   * Row-level trigger `trg_prevent_source_auth_audit_events_mutation` blocks `UPDATE` and `DELETE`.
+   * Statement-level trigger `trg_prevent_source_auth_audit_events_truncate` (`BEFORE TRUNCATE`) blocks `TRUNCATE`.
+   * Database privilege level: `REVOKE TRUNCATE, DELETE, UPDATE ON "source_auth_audit_events" FROM PUBLIC;` prevents privilege-level ledger wiping.
 
 ---
 

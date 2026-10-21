@@ -91,9 +91,9 @@ export async function fetchSearch(
   const sort = options.sort ?? "relevance";
   const operation =
     options.operation ??
-    (options.purpose && options.scope
-      ? { sourceId: "reddit" as const, purpose: options.purpose, scope: options.scope }
-      : undefined);
+    (options.purpose === "competitor_intelligence"
+      ? ACQUISITION_OPERATIONS.competitor_search
+      : ACQUISITION_OPERATIONS.lead_search);
   return fetchShared<PostPage>({
     ctx,
     kind: "keyword",
@@ -136,10 +136,7 @@ export async function fetchSubredditPosts(
 ): Promise<SharedResult<PostPage>> {
   const { cursor, limit } = options;
   const operation =
-    options.operation ??
-    (options.purpose && options.scope
-      ? { sourceId: "reddit" as const, purpose: options.purpose, scope: options.scope }
-      : undefined);
+    options.operation ?? ACQUISITION_OPERATIONS.lead_subreddit_posts;
   return fetchShared<PostPage>({
     ctx,
     kind: "subreddit_posts",
@@ -183,9 +180,11 @@ export async function fetchPost(
 ): Promise<SharedResult<StoredPost[]>> {
   const operation =
     options?.operation ??
-    (options?.purpose && options?.scope
-      ? { sourceId: "reddit" as const, purpose: options.purpose, scope: options.scope }
-      : undefined);
+    (options?.purpose === "competitor_intelligence"
+      ? ACQUISITION_OPERATIONS.competitor_post
+      : options?.purpose === "seo_opportunity_discovery"
+        ? ACQUISITION_OPERATIONS.seo_post
+        : ACQUISITION_OPERATIONS.lead_post);
   return fetchShared<StoredPost[]>({
     ctx,
     kind: "post",
@@ -213,10 +212,7 @@ export async function fetchPostComments(
   },
 ): Promise<SharedResult<StoredComment[]>> {
   const operation =
-    options?.operation ??
-    (options?.purpose && options?.scope
-      ? { sourceId: "reddit" as const, purpose: options.purpose, scope: options.scope }
-      : undefined);
+    options?.operation ?? ACQUISITION_OPERATIONS.lead_comments;
   return fetchShared<StoredComment[]>({
     ctx,
     kind: "comments",

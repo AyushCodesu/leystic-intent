@@ -49,6 +49,20 @@ CREATE TRIGGER trg_prevent_source_auth_audit_events_mutation
 BEFORE UPDATE OR DELETE ON "source_auth_audit_events"
 FOR EACH ROW EXECUTE FUNCTION prevent_source_auth_audit_events_mutation();
 
+CREATE OR REPLACE FUNCTION prevent_source_auth_audit_events_truncate()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION 'source_auth_audit_events is an append-only audit ledger: TRUNCATE is prohibited';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_prevent_source_auth_audit_events_truncate ON "source_auth_audit_events";
+CREATE TRIGGER trg_prevent_source_auth_audit_events_truncate
+BEFORE TRUNCATE ON "source_auth_audit_events"
+FOR EACH STATEMENT EXECUTE FUNCTION prevent_source_auth_audit_events_truncate();
+
+REVOKE TRUNCATE, DELETE, UPDATE ON "source_auth_audit_events" FROM PUBLIC;
+
 -- Seed default authoritative records (DO NOT promote blocked or pending sources)
 INSERT INTO "source_auth_records" (
   "record_id", "source_id", "name", "status", "authorized_purposes", "scopes",
