@@ -1,4 +1,4 @@
-import { boolean, index, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, index, integer, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 export type SourceAuthStatus = "PENDING" | "APPROVED" | "BLOCKED" | "EXPIRED";
 
@@ -139,3 +139,19 @@ export const operatorCredentialAuditEvents = pgTable(
     index("operator_credential_audit_events_created_at_idx").on(t.createdAt),
   ],
 );
+
+/**
+ * Authoritative persisted operator bootstrap singleton state.
+ * Enforces first-use-only bootstrap constraint and tracks recovery operations.
+ */
+export const operatorBootstrapState = pgTable("operator_bootstrap_state", {
+  id: text("id").primaryKey(),
+  isBootstrapped: boolean("is_bootstrapped").notNull().default(false),
+  bootstrappedAt: timestamp("bootstrapped_at", { withTimezone: true }),
+  bootstrappedBy: text("bootstrapped_by"),
+  recoveryCount: integer("recovery_count").notNull().default(0),
+  lastRecoveryAt: timestamp("last_recovery_at", { withTimezone: true }),
+  lastRecoveryReason: text("last_recovery_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

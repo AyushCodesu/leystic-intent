@@ -26,6 +26,8 @@ import {
   operatorRevokeCredential,
   operatorRotateCredential,
   bootstrapOperatorCredentials,
+  emergencyRecoverOperatorCredentials,
+  getOperatorBootstrapStatus,
   getOperatorCredentialAuditHistory,
   setGlobalOperatorCredentialStore,
   initOperatorCredentialRegistry,
@@ -59,6 +61,8 @@ export {
   operatorRevokeCredential,
   operatorRotateCredential,
   bootstrapOperatorCredentials,
+  emergencyRecoverOperatorCredentials,
+  getOperatorBootstrapStatus,
   getOperatorCredentialAuditHistory,
   setGlobalOperatorCredentialStore,
   initOperatorCredentialRegistry,
@@ -770,6 +774,7 @@ export interface SourceAuthStore {
   subscribeInvalidation?(callback: InvalidationCallback): () => void;
   checkInvalidated?(sinceMs: number): boolean;
   readStateSync?(): TrustedAuthRecord[];
+  ready?(): Promise<void>;
 }
 
 const fileStoreEventBus = new EventEmitter();
@@ -828,6 +833,10 @@ export class PersistentFileSourceAuthStore implements SourceAuthStore {
     } catch {
       return { records: {}, auditEvents: [] };
     }
+  }
+
+  async ready(): Promise<void> {
+    this.ensureInitialized();
   }
 
   readStateSync(): TrustedAuthRecord[] {
@@ -953,47 +962,72 @@ export class PersistentFileSourceAuthStore implements SourceAuthStore {
  */
 export class DrizzleSourceAuthStore implements SourceAuthStore {
   private invalidationListeners: Set<InvalidationCallback> = new Set();
-  private isListening = false;
+  private listeningPromise: Promise<void> | null = null;
   private unsubscribeClient?: () => Promise<void>;
+
+  async ready(): Promise<void> {
+    await this.ensureListening();
+  }
 
   subscribeInvalidation(callback: InvalidationCallback): () => void {
     this.invalidationListeners.add(callback);
-    void this.ensureListening();
+    void this.ensureListening().catch(() => {});
     return () => {
       this.invalidationListeners.delete(callback);
     };
   }
 
-  private async ensureListening(): Promise<void> {
-    if (this.isListening) return;
-    this.isListening = true;
-    try {
-      const postgres = (await import("postgres")).default;
-      const { config } = await import("@/lib/config");
-      const client = postgres(config().DATABASE_URL, { max: 1, idle_timeout: 0 });
-      const { unlisten } = await client.listen("source_auth_invalidation", (msg) => {
-        try {
-          const parsed = typeof msg === "string" ? JSON.parse(msg) : msg;
-          for (const listener of this.invalidationListeners) {
-            listener(parsed);
-          }
-        } catch {
-          for (const listener of this.invalidationListeners) {
-            listener({});
-          }
-        }
-      });
-      this.unsubscribeClient = async () => {
-        try {
-          await unlisten();
-          await client.end({ timeout: 1 });
-        } catch {
-          // ignore
-        }
-      };
-    } catch {
-      this.isListening = false;
+  private ensureListening(): Promise<void> {
+    if (this.listeningPromise) {
+      return this.listeningPromise;
     }
+    this.listeningPromise = (async () => {
+      try {
+        const postgres = (await import("postgres")).default;
+        const { config } = await import("@/lib/config");
+        const client = postgres(config().DATABASE_URL, {
+          max: 1,
+          idle_timeout: 0,
+          onclose: () => {
+            for (const listener of this.invalidationListeners) {
+              listener({});
+            }
+          },
+        });
+        const { unlisten } = await client.listen(
+          "source_auth_invalidation",
+          (msg) => {
+            try {
+              const parsed = typeof msg === "string" ? JSON.parse(msg) : msg;
+              for (const listener of this.invalidationListeners) {
+                listener(parsed);
+              }
+            } catch {
+              for (const listener of this.invalidationListeners) {
+                listener({});
+              }
+            }
+          },
+          () => {
+            for (const listener of this.invalidationListeners) {
+              listener({});
+            }
+          },
+        );
+        this.unsubscribeClient = async () => {
+          try {
+            await unlisten();
+            await client.end({ timeout: 1 });
+          } catch {
+            // ignore
+          }
+        };
+      } catch (err) {
+        this.listeningPromise = null;
+        throw err;
+      }
+    })();
+    return this.listeningPromise;
   }
 
   async getRecord(recordId: string): Promise<TrustedAuthRecord | null> {
@@ -1286,6 +1320,12 @@ export class SourcePolicyRegistry {
     this.revision++;
   }
 
+  async ready(): Promise<void> {
+    if (typeof this.store.ready === "function") {
+      await this.store.ready();
+    }
+  }
+
   getStore(): SourceAuthStore {
     return this.store;
   }
@@ -1315,7 +1355,7 @@ export class SourcePolicyRegistry {
     if (!this.storeHealthy) {
       return null;
     }
-    if (this.store.checkInvalidated && this.store.checkInvalidated(this.lastSyncMs)) {
+    if (this.isCacheExpired()) {
       if (typeof this.store.readStateSync === "function") {
         try {
           const records = this.store.readStateSync();
@@ -1326,10 +1366,12 @@ export class SourcePolicyRegistry {
           }
           this.lastSyncMs = Date.now();
         } catch {
-          this.cache.delete(recordId.trim());
+          this.cache.clear();
+          return null;
         }
       } else {
-        this.cache.delete(recordId.trim());
+        this.cache.clear();
+        return null;
       }
     }
     const found = this.cache.get(recordId.trim());
@@ -1340,7 +1382,7 @@ export class SourcePolicyRegistry {
     if (!this.storeHealthy) {
       return [];
     }
-    if (this.store.checkInvalidated && this.store.checkInvalidated(this.lastSyncMs)) {
+    if (this.isCacheExpired()) {
       if (typeof this.store.readStateSync === "function") {
         try {
           const records = this.store.readStateSync();
@@ -1351,8 +1393,12 @@ export class SourcePolicyRegistry {
           }
           this.lastSyncMs = Date.now();
         } catch {
-          // ignore
+          this.cache.clear();
+          return [];
         }
+      } else {
+        this.cache.clear();
+        return [];
       }
     }
     return Array.from(this.cache.values()).map(cloneAndFreezeRecord);
@@ -1401,6 +1447,8 @@ export class SourcePolicyRegistry {
     record: TrustedAuthRecord,
     options?: { unblockConfirmed?: boolean; reason?: string },
   ): Promise<TrustedAuthRecord> {
+    await ensureOperatorCredentialFresh();
+    await this.ensureFresh();
     const verified = assertAuthorizedOperator(operator);
     const validated = validateTrustedAuthRecord(record);
 
@@ -1455,6 +1503,8 @@ export class SourcePolicyRegistry {
       now?: Date;
     },
   ): Promise<TrustedAuthRecord> {
+    await ensureOperatorCredentialFresh();
+    await this.ensureFresh();
     const verified = assertAuthorizedOperator(operator);
     const existing = this.cache.get(params.recordId.trim());
     if (!existing) {
@@ -1524,6 +1574,8 @@ export class SourcePolicyRegistry {
       revokedAt?: string;
     },
   ): Promise<TrustedAuthRecord> {
+    await ensureOperatorCredentialFresh();
+    await this.ensureFresh();
     const verified = assertAuthorizedOperator(operator);
     const existing = this.cache.get(params.recordId.trim());
     if (!existing) {
@@ -1586,6 +1638,17 @@ export class SourcePolicyRegistry {
     }
     const validated = validateTrustedAuthRecord(record);
     this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
+    this.lastSyncMs = Date.now();
+    this.isHydrated = true;
+    this.revision++;
+  }
+
+  __testOnlyRemoveRecord(recordId: string): void {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("__testOnlyRemoveRecord cannot be called in production.");
+    }
+    this.cache.delete(recordId.trim());
+    this.revision++;
   }
 
   async reset(): Promise<void> {
@@ -1652,6 +1715,7 @@ export async function operatorApproveRecord(
     now?: Date;
   },
 ): Promise<TrustedAuthRecord> {
+  await ensureSourcePolicyFresh();
   return globalRegistry.approveRecord(operator, params);
 }
 
@@ -1665,6 +1729,7 @@ export async function operatorRevokeRecord(
     revokedAt?: string;
   },
 ): Promise<TrustedAuthRecord> {
+  await ensureSourcePolicyFresh();
   return globalRegistry.revokeRecord(operator, params);
 }
 
@@ -1674,6 +1739,7 @@ export async function operatorRegisterRecord(
   record: TrustedAuthRecord,
   options?: { unblockConfirmed?: boolean; reason?: string },
 ): Promise<TrustedAuthRecord> {
+  await ensureSourcePolicyFresh();
   return globalRegistry.registerRecord(operator, record, options);
 }
 
@@ -1690,6 +1756,14 @@ export function __testOnlyRegisterRecord(record: TrustedAuthRecord): void {
     throw new Error("__testOnlyRegisterRecord cannot be called in production.");
   }
   globalRegistry.__testOnlyInjectRecord(record);
+}
+
+/** Test-only helper to remove mock records during automated testing. */
+export function __testOnlyRemoveRecord(recordId: string): void {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("__testOnlyRemoveRecord cannot be called in production.");
+  }
+  globalRegistry.__testOnlyRemoveRecord(recordId);
 }
 
 /**

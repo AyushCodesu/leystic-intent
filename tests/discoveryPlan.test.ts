@@ -1,4 +1,5 @@
-import { expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import type { DiscoveryPlan } from "@/lib/discovery/plan";
 import type { ThreadLabel } from "@/lib/discovery/label";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
@@ -23,6 +24,16 @@ const PLAN: DiscoveryPlan = {
 };
 
 describeDb("publishing a discovery plan", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   it("files a round in one trip, each thread's last verdict and last place named on every row", async () => {
     const { db } = await import("@/db");
     const schema = await import("@/db/schema");

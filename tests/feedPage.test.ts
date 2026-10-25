@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { forgetEveryProjectFeed } from "@/lib/projectFeedCache";
 import { describeDb, makePost, makeProject, makeUser } from "./fixtures/db";
 
@@ -13,8 +14,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 describeDb("the leads page read", () => {
   /** Every user this file made, so nothing it wrote outlives the test. */
   const made: string[] = [];
+  let cleanupAuth: (() => Promise<void>) | undefined;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
     forgetEveryProjectFeed();
   });
 
@@ -25,6 +29,7 @@ describeDb("the leads page read", () => {
    * shared by every project and are left where they are.
    */
   afterEach(async () => {
+    await cleanupAuth?.();
     if (made.length === 0) {
       return;
     }

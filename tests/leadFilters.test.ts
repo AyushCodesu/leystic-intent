@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { subredditKey, termsOf, wordsOf } from "@/lib/filterWords";
 import { ALERT_SCORE_FLOOR, mentions, passesWords, type LeadFilters } from "@/lib/leadFilters";
 import { foldQuotes } from "@/lib/scan/evidence";
@@ -60,6 +61,16 @@ describe("word matching", () => {
 });
 
 describeDb("a project's filters where leads are read", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   /** A project with these filters, and `muted` as its keyword mutes. */
   async function fixture(
     { muted = [], ...leadFilters }: Partial<LeadFilters> & { muted?: string[] },

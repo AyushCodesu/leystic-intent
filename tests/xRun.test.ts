@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import type { Question } from "@/lib/jev";
 import { FIRST_LOOK_EXTRA, FIRST_LOOK_HOURS, OPENED_WITHIN_DAYS } from "@/lib/x/constants";
 import { TIERS } from "@/lib/tiers";
@@ -144,8 +145,11 @@ describeDb("the X pipeline against a database", () => {
   let run: typeof import("@/lib/x/run");
   let openX: typeof import("@/lib/x/open").openX;
   let orm: typeof import("drizzle-orm");
+  let cleanupAuth: (() => Promise<void>) | undefined;
 
   beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("x");
+    cleanupAuth = auth.cleanup;
     process.env.X_LEADS = "true";
     // The local .env is self-hosted, which has no caps; these tests are about the hosted tiers.
     process.env.SELF_HOSTED = "false";
@@ -170,6 +174,10 @@ describeDb("the X pipeline against a database", () => {
     generateStructured.mockRejectedValue(new Error("no model in tests"));
     askJev.mockImplementation(async (call) => answerAll(call));
     profile.mockResolvedValue({ output: { found: true, data: { handle: "x", bio: "runs a small agency" } }, costUsd: 0.00022 });
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
   });
 
   async function fixture(competitors: string[], opts: { brief?: boolean } = {}) {

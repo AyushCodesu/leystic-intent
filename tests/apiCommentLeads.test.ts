@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -9,6 +10,16 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * feed reads it that way, and the API and the alerts must agree with the feed.
  */
 describeDb("a fresh comment on an old thread", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   it("is listed by the API inside the window and links to the comment", async () => {
     const { db } = await import("@/db");
     const { leads, redditComments, redditPosts, users } = await import("@/db/schema");

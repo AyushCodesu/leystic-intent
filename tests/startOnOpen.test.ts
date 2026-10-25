@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { expect, it, vi } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import * as schema from "@/db/schema";
@@ -16,6 +17,17 @@ vi.mock("@/jobs/scheduler", () => ({ kickScheduler }));
  * queues nothing, and nobody starts a job on a project that is not theirs.
  */
 describeDb("startOnOpen against a database", () => {
+  let uninstallAuth: (() => Promise<void>) | null = null;
+
+  beforeAll(async () => {
+    uninstallAuth = (await installTestAuthorizedSource("reddit")).cleanup;
+  });
+
+  afterAll(async () => {
+    if (uninstallAuth) {
+      await uninstallAuth();
+    }
+  });
   async function owned() {
     const user = await makeUser({ clerkUserId: `user_${randomUUID()}`, email: `${randomUUID()}@example.com` });
     const project = await makeProject(user.id);

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import type { StoredPost } from "@/lib/reddit/store";
 import { judgeAnswers, readingAnswers, triageAnswers, type JevSpec } from "./jevAnswers";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
@@ -55,6 +56,17 @@ function wordsOf(one: Asked): string {
 }
 
 describeDb("runScan against a database", () => {
+  let uninstallAuth: (() => Promise<void>) | null = null;
+
+  beforeAll(async () => {
+    uninstallAuth = (await installTestAuthorizedSource("reddit")).cleanup;
+  });
+
+  afterAll(async () => {
+    if (uninstallAuth) {
+      await uninstallAuth();
+    }
+  });
   let db: typeof import("@/db").db;
   let schema: typeof import("@/db/schema");
   let runScan: typeof import("@/lib/scan/run").runScan;

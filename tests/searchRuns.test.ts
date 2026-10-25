@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { variantOf } from "@/lib/reddit/fetch";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
@@ -24,6 +25,17 @@ describe("variant string", () => {
  * asking for page two. Proven against a real database; skips without one.
  */
 describeDb("the stored run key", () => {
+  let uninstallAuth: (() => Promise<void>) | null = null;
+
+  beforeAll(async () => {
+    uninstallAuth = (await installTestAuthorizedSource("reddit")).cleanup;
+  });
+
+  afterAll(async () => {
+    if (uninstallAuth) {
+      await uninstallAuth();
+    }
+  });
   it("tells two SKUs and two page variants apart", async () => {
     const { db } = await import("@/db");
     const { searchRuns } = await import("@/db/schema");

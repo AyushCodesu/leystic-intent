@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 /**
@@ -20,8 +21,11 @@ describeDb("X search runs in the shared store", () => {
   let schema: typeof import("@/db/schema");
   let orm: typeof import("drizzle-orm");
   let searchPage: typeof import("@/lib/x/skus").searchPage;
+  let cleanupAuth: (() => Promise<void>) | undefined;
 
   beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("x");
+    cleanupAuth = auth.cleanup;
     process.env.HOUSE_X_DATA_CAP_USD_PER_DAY = "5";
     ({ db } = await import("@/db"));
     schema = await import("@/db/schema");
@@ -29,6 +33,10 @@ describeDb("X search runs in the shared store", () => {
     ({ searchPage } = await import("@/lib/x/skus"));
     search.mockReset();
     search.mockResolvedValue(page());
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
   });
 
   async function context() {

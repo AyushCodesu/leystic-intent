@@ -137,11 +137,19 @@ Every managed source is governed by an authoritative record in the trusted regis
    - Foreign key to `source_auth_records` is configured with `ON DELETE RESTRICT`, preventing cascading deletion.
    - Enforced by database trigger `prevent_source_auth_audit_events_mutation` prohibiting `UPDATE` and `DELETE` operations on `source_auth_audit_events`.
 
-3. **Authoritative PostgreSQL Runtime Initialization**:
+3. **Authoritative PostgreSQL Runtime Initialization & Cross-Worker Consistency**:
    - In production (`NODE_ENV === "production"`), the registry strictly instantiates `DrizzleSourceAuthStore` (`createDefaultSourceAuthStore()`) reading from PostgreSQL. Falling back to file-backed storage in production is prohibited.
    - Hydration occurs during application server startup via `initSourcePolicyRegistry()` wired directly into `src/instrumentation.ts:register()`.
    - If the durable store fails or is unreachable, the registry marks itself unhealthy and clears the cache, failing closed immediately. No stale approved cache entries are preserved.
-   - Cross-worker revocation consistency: revocation updates PostgreSQL durably and invalidates in-memory cache. Rehydration occurs automatically when the cache TTL expires or when `ensureFresh()` is called prior to protected operations.
+   - Cross-worker revocation consistency: mutations emit PostgreSQL notifications via `pg_notify('source_auth_invalidation', ...)` in the same transaction as the database write.
+   - Independent worker registries establish dedicated PostgreSQL notification listeners with explicit readiness confirmation (`ready()`). Reconnection, disconnect, and socket errors synchronously invalidate the cache.
+   - Bounded staleness model: cached authorizations maintain a strict maximum staleness window (`maxStalenessMs = 100ms`). In the event of missed notifications or listener partitions, operations check `ensureSourcePolicyFresh()`. If cache age exceeds the staleness threshold and the store cannot be reached, the registry fails closed immediately.
+
+4. **Durable Operator Credentials & First-Use Bootstrap Hardening**:
+   - Operator credentials are persisted durably in `operator_credentials` with append-only audit tracking in `operator_credential_audit_events`.
+   - Plaintext secret tokens are never stored; verification uses SHA-256 token hashes with strict entropy requirements (minimum 32 characters).
+   - Singleton bootstrap state is governed by `operator_bootstrap_state`. Initial bootstrap is strictly first-use-only and protected by PostgreSQL row-level locks (`SELECT ... FOR UPDATE`), preventing concurrent bootstrap races across workers and rejecting any repeated bootstrap attempts once initialized.
+   - Emergency recovery is isolated under `emergencyRecoverOperatorCredentials`, requiring explicit operator justification, tracking durable recovery counts, and recording auditable provenance without bypassing append-only audit ledgers.
 
 ```ts
 export type TrustedAuthRecord = {

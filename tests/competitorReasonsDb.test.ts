@@ -1,10 +1,21 @@
-import { expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makePost, makeProject, makeUser } from "./fixtures/db";
 import { db } from "@/db";
 import { competitorMentions, projectCompetitors } from "@/db/schema";
 import { listMentions } from "@/lib/competitors/read";
 
 describeDb("competitor reasons database persistence and tenant isolation", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   it("persists reason category, switching evidence, and grounded explanation with strict tenant isolation", async () => {
     const user = await makeUser();
     const projectA = await makeProject(user.id, { name: "Project Alpha" });

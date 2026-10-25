@@ -1,4 +1,5 @@
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 /**
@@ -36,10 +37,18 @@ async function fixture(discovered: Date | null = null) {
 }
 
 describeDb("the initial discovery", () => {
-  beforeEach(() => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("all");
+    cleanupAuth = auth.cleanup;
     process.env.SELF_HOSTED = "false";
     runDiscovery.mockClear();
     resolveActiveSubreddits.mockClear();
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
   });
 
   it("publishes a plan and books every first job once", async () => {

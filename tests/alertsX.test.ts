@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { renderDigestHtml, renderDigestText } from "@/lib/alerts/digest";
 import { xAskLead } from "@/lib/alerts/leads";
 import { payloadFor } from "@/lib/alerts/send";
@@ -347,8 +348,15 @@ describe("a digest carrying X asks beside Reddit leads", () => {
 
 /** The query and the switch are the claim, so they are proven against a real database. */
 describeDb("reading X asks for a digest", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
   const saved = { X_LEADS: process.env.X_LEADS };
-  afterEach(() => {
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("x");
+    cleanupAuth = auth.cleanup;
+  });
+  afterEach(async () => {
+    await cleanupAuth?.();
     // Assigning undefined to process.env stores the string "undefined".
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) {

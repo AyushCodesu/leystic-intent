@@ -972,6 +972,8 @@ export type LiveEvaluationResult = {
 };
 
 export async function runLiveEvaluation(): Promise<LiveEvaluationResult> {
+
+
   if (existsSync(".env")) {
     process.loadEnvFile(".env");
   }
@@ -998,6 +1000,12 @@ export async function runLiveEvaluation(): Promise<LiveEvaluationResult> {
   if (!local) {
     throw new Error(
       "Live evaluation prerequisite failed: Database has no project row to record usage. Live evaluation requires at least one project in the database.",
+    );
+  }
+
+  if (process.env.VITEST) {
+    throw new Error(
+      "Live evaluation prerequisite failed: Live model evaluation is disabled during automated test execution (VITEST). Use runRecordedEvaluation() to assert benchmark outputs deterministically.",
     );
   }
 

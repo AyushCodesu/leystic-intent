@@ -1363,6 +1363,9 @@ describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
     const storeB = new DrizzleSourceAuthStore();
     const registryB = new SourcePolicyRegistry(storeB, 100);
 
+    await storeA.ready();
+    await storeB.ready();
+
     const testRecordId = `REC-TEST-MULTIWORKER-${randomUUID().slice(0, 8)}`;
     const testRecord: TrustedAuthRecord = {
       recordId: testRecordId,
@@ -1403,6 +1406,57 @@ describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
     expect(revokedOnB?.revocationReason).toBe("Cross-worker revocation consistency test");
   });
 
+  it("enforces TTL fallback when a cross-worker notification is missed", async () => {
+    const storeA = new DrizzleSourceAuthStore();
+    const registryA = new SourcePolicyRegistry(storeA, 100);
+    const storeB = new DrizzleSourceAuthStore();
+    const registryB = new SourcePolicyRegistry(storeB, 100);
+
+    await storeA.ready();
+    await storeB.ready();
+
+    const testRecordId = `REC-TEST-TTL-${randomUUID().slice(0, 8)}`;
+    const testRecord: TrustedAuthRecord = {
+      recordId: testRecordId,
+      sourceId: "reddit",
+      name: "TTL Fallback Invalidation Record",
+      status: "APPROVED",
+      authorizedPurposes: ["commercial_lead_generation"],
+      scopes: ["search_discovery"],
+      effectiveDate: "2026-01-01T00:00:00.000Z",
+      expirationDate: null,
+      evidenceReference: "CONTRACT-CROSS-WORKER-TTL",
+      approvalProvenance: {
+        approvedBy: legalOperator.operatorId ?? "legal_counsel_001",
+        reviewedAt: new Date().toISOString(),
+        notes: "Approved for TTL fallback test",
+      },
+    };
+
+    await registryA.registerRecord(legalOperator, testRecord);
+    await registryB.syncFromStore();
+    expect(registryB.getRecord(testRecordId)?.status).toBe("APPROVED");
+
+    await registryA.revokeRecord(complianceOperator, {
+      recordId: testRecordId,
+      status: "BLOCKED",
+      reason: "TTL fallback revocation test",
+    });
+
+    // Wait for TTL (100ms) to elapse to simulate missed notification
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // Cache is expired, so synchronous getRecord fails closed rather than returning stale approved
+    expect(registryB.isCacheExpired()).toBe(true);
+    expect(registryB.getRecord(testRecordId)).toBeNull();
+
+    // Calling ensureFresh rehydrates from authoritative DB store
+    await registryB.ensureFresh();
+    const revokedOnB = registryB.getRecord(testRecordId);
+    expect(revokedOnB?.status).toBe("BLOCKED");
+    expect(revokedOnB?.revocationReason).toBe("TTL fallback revocation test");
+  });
+
   it("strictly enforces database-level append-only immutability and blocks TRUNCATE on audit events", async () => {
     const { db } = await import("@/db");
     const { sql } = await import("drizzle-orm");
@@ -1423,6 +1477,9 @@ describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
     const registryA = new OperatorCredentialRegistry(storeA, 100);
     const storeB = new DrizzleOperatorCredentialStore();
     const registryB = new OperatorCredentialRegistry(storeB, 100);
+
+    await storeA.ready();
+    await storeB.ready();
 
     const testCredId = `cred_worker_db_${randomUUID().slice(0, 8)}`;
     const testSecret = `db_worker_secret_token_${randomUUID().slice(0, 8)}_1234`;
@@ -1451,6 +1508,121 @@ describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
     const revokedOnB = registryB.getCredential(testCredId);
     expect(revokedOnB?.revoked).toBe(true);
     expect(revokedOnB?.revocationReason).toBe("Database cross-worker revocation test");
+  });
+
+  it("enforces durable first-use-only bootstrap constraint in PostgreSQL", async () => {
+    const store = new DrizzleOperatorCredentialStore();
+    const registry = new OperatorCredentialRegistry(store, 100);
+    await store.ready();
+
+    vi.stubEnv("OPERATOR_BOOTSTRAP_KEY", "pg-bootstrap-key-12345");
+
+    const credId = `cred_pg_boot_${randomUUID().slice(0, 8)}`;
+    const secret = `pg_secret_bootstrap_${randomUUID().slice(0, 8)}_1234`;
+
+    // First bootstrap succeeds (or was already bootstrapped in prior test run)
+    const currentStatus = await store.getBootstrapStatus();
+    if (!currentStatus.isBootstrapped) {
+      const bootstrapped = await registry.bootstrapCredentials({
+        bootstrapKey: "pg-bootstrap-key-12345",
+        credentials: [
+          {
+            credentialId: credId,
+            operatorId: "pg_bootstrap_operator",
+            role: "system_administrator",
+            secret,
+            description: "Initial bootstrap operator",
+          },
+        ],
+        reason: "Initial deployment bootstrap",
+      });
+
+      expect(bootstrapped).toHaveLength(1);
+      expect(bootstrapped[0].credentialId).toBe(credId);
+
+      const auditHistory = await store.getAuditEvents(credId);
+      const provEvent = auditHistory.find((e) => e.action === "PROVISION");
+      expect(provEvent).toBeDefined();
+      expect(provEvent?.performedBy).toBe("emergency_bootstrap");
+    }
+
+    // Repeated bootstrap must fail closed with OperatorAuthorizationError
+    await expect(
+      registry.bootstrapCredentials({
+        bootstrapKey: "pg-bootstrap-key-12345",
+        credentials: [
+          {
+            credentialId: `cred_repeat_${randomUUID().slice(0, 8)}`,
+            operatorId: "repeat_bootstrap_operator",
+            role: "system_administrator",
+            secret: `repeat_secret_${randomUUID().slice(0, 8)}_1234`,
+          },
+        ],
+      }),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    // Concurrent bootstrap attempts: all subsequent attempts fail closed
+    const concurrentAttempts = await Promise.allSettled([
+      registry.bootstrapCredentials({
+        bootstrapKey: "pg-bootstrap-key-12345",
+        credentials: [
+          {
+            credentialId: `cred_conc_1_${randomUUID().slice(0, 8)}`,
+            operatorId: "conc_operator_1",
+            role: "system_administrator",
+            secret: `conc_secret_1_${randomUUID().slice(0, 8)}_1234`,
+          },
+        ],
+      }),
+      registry.bootstrapCredentials({
+        bootstrapKey: "pg-bootstrap-key-12345",
+        credentials: [
+          {
+            credentialId: `cred_conc_2_${randomUUID().slice(0, 8)}`,
+            operatorId: "conc_operator_2",
+            role: "system_administrator",
+            secret: `conc_secret_2_${randomUUID().slice(0, 8)}_1234`,
+          },
+        ],
+      }),
+    ]);
+    expect(concurrentAttempts[0].status).toBe("rejected");
+    expect(concurrentAttempts[1].status).toBe("rejected");
+
+    // Emergency recovery succeeds with valid recovery key
+    vi.stubEnv("OPERATOR_RECOVERY_KEY", "pg-emergency-recovery-key-99999");
+
+    const recoveryCredId = `cred_recovery_${randomUUID().slice(0, 8)}`;
+    const recoverySecret = `recovery_secret_${randomUUID().slice(0, 8)}_1234`;
+
+    const recovered = await registry.emergencyRecoverCredentials({
+      recoveryKey: "pg-emergency-recovery-key-99999",
+      confirmRecovery: true,
+      reason: "PostgreSQL emergency credential recovery",
+      credentials: [
+        {
+          credentialId: recoveryCredId,
+          operatorId: "recovery_operator",
+          role: "system_administrator",
+          secret: recoverySecret,
+          description: "Emergency recovered operator",
+        },
+      ],
+    });
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0].credentialId).toBe(recoveryCredId);
+
+    const recoveryAuditHistory = await store.getAuditEvents(recoveryCredId);
+    const recEvent = recoveryAuditHistory.find((e) => e.action === "RECOVERY");
+    expect(recEvent).toBeDefined();
+    expect(recEvent?.performedBy).toBe("emergency_recovery");
+    expect(recEvent?.reason).toBe("PostgreSQL emergency credential recovery");
+
+    const status = await store.getBootstrapStatus();
+    expect(status.isBootstrapped).toBe(true);
+    expect(status.recoveryCount).toBeGreaterThanOrEqual(1);
+    expect(status.lastRecoveryReason).toBe("PostgreSQL emergency credential recovery");
   });
 
   it("strictly enforces database-level append-only immutability and blocks TRUNCATE and DELETE on operator credential audit events", async () => {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makePost, makeProject, makeUser } from "./fixtures/db";
 
 /**
@@ -11,6 +12,16 @@ import { describeDb, makePost, makeProject, makeUser } from "./fixtures/db";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 describeDb("the feed at read time", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   async function fixture(threshold: number | null) {
     const { db } = await import("@/db");
     const schema = await import("@/db/schema");

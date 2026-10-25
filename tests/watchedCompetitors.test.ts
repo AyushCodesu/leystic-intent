@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 /**
@@ -37,6 +38,17 @@ vi.mock("@/jobs/enqueue", async (importOriginal) => ({
 }));
 
 describeDb("the competitors a project watches", () => {
+  let uninstallAuth: (() => Promise<void>) | null = null;
+
+  beforeAll(async () => {
+    uninstallAuth = (await installTestAuthorizedSource("reddit")).cleanup;
+  });
+
+  afterAll(async () => {
+    if (uninstallAuth) {
+      await uninstallAuth();
+    }
+  });
   beforeEach(() => {
     googleSearch.mockReset();
     labelThreads.mockReset();

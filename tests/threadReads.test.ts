@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import type { StoredPost } from "@/lib/reddit/store";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
@@ -51,7 +52,11 @@ vi.mock("@/jobs/enqueue", async (importOriginal) => ({
 const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describeDb("posts a job opens together", () => {
-  beforeEach(() => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("all");
+    cleanupAuth = auth.cleanup;
     for (const mock of [
       fetchSearch,
       fetchPost,
@@ -65,6 +70,10 @@ describeDb("posts a job opens together", () => {
     }
     labelThreads.mockResolvedValue([]);
     judgePosts.mockResolvedValue([]);
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
   });
 
   async function fixture(phrasings: string[] = []) {

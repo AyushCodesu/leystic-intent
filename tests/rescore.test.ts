@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { judgeAnswers, readingAnswers, type JevSpec } from "./jevAnswers";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
@@ -18,6 +19,17 @@ vi.mock("@/lib/jev", async (importOriginal) => ({
 }));
 
 describeDb("re-judging a project under a new scorer", () => {
+  let uninstallAuth: (() => Promise<void>) | null = null;
+
+  beforeAll(async () => {
+    uninstallAuth = (await installTestAuthorizedSource("reddit")).cleanup;
+  });
+
+  afterAll(async () => {
+    if (uninstallAuth) {
+      await uninstallAuth();
+    }
+  });
   let db: typeof import("@/db").db;
   let schema: typeof import("@/db/schema");
   let runRescore: typeof import("@/lib/scan/rescore").runRescore;

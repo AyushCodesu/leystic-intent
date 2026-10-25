@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { db } from "@/db";
 import * as schema from "@/db/schema";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
@@ -15,6 +16,17 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * Hidden tabs, and a card counts what its link opens.
  */
 describeDb("the leads Insights groups and counts", () => {
+  let uninstallAuth: (() => Promise<void>) | null = null;
+
+  beforeAll(async () => {
+    uninstallAuth = (await installTestAuthorizedSource("reddit")).cleanup;
+  });
+
+  afterAll(async () => {
+    if (uninstallAuth) {
+      await uninstallAuth();
+    }
+  });
   async function fixture() {
     const user = await makeUser({ clerkUserId: `user_${randomUUID()}` });
     const project = await makeProject(user.id, { leadFilters: { mustMention: ["form"] } });

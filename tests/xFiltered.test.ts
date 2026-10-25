@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { filteredPointer, filteredSentence, filteredSummary, filteredWord } from "@/components/x/filtered";
 import type { XFiltered, XFilteredCard } from "@/lib/x/read";
 import { describeDb, makeProject, makeUser, newId } from "./fixtures/db";
@@ -77,6 +78,16 @@ describe("the filtered-out words", () => {
 });
 
 describeDb("the filtered-out list against a database", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("x");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   async function seed(rows: Record<string, Row>) {
     const { db } = await import("@/db");
     const schema = await import("@/db/schema");

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, inArray } from "drizzle-orm";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { competitorsNamed } from "@/lib/competitors/match";
 import { seoSettings } from "@/lib/seo/limits";
 import { redditResults, redditThread } from "@/lib/seo/links";
@@ -12,6 +13,17 @@ vi.mock("@/jobs/enqueue", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/jobs/enqueue")>()),
   enqueueJob: vi.fn(),
 }));
+
+let cleanupAuth: (() => Promise<void>) | undefined;
+
+beforeEach(async () => {
+  const auth = await installTestAuthorizedSource("all");
+  cleanupAuth = auth.cleanup;
+});
+
+afterEach(async () => {
+  await cleanupAuth?.();
+});
 
 describe("Reddit thread links", () => {
   it("reads the community and the post out of a thread URL on any reddit host", () => {

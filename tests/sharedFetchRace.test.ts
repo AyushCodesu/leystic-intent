@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 /**
@@ -8,6 +9,16 @@ import { describeDb, makeProject, makeUser } from "./fixtures/db";
  * the run in that moment, and two callers who both missed buy it once.
  */
 describeDb("a shared fetch still being stored", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   async function fixture() {
     const { db } = await import("@/db");
     const { searchRuns, users } = await import("@/db/schema");

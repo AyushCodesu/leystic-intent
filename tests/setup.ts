@@ -62,3 +62,51 @@ process.env.RUN_SCHEDULER = "false";
  * as in CI; a test that needs a particular key stubs it with vi.stubEnv.
  */
 process.env.APP_ENCRYPTION_KEY ??= Buffer.alloc(32).toString("base64");
+
+/**
+ * Outbound network safeguard: intercept unmocked HTTP requests to live provider endpoints
+ * during automated testing. Tests must mock external providers explicitly.
+ */
+const BLOCKED_HOSTS = new Set([
+  "openrouter.ai",
+  "ai-gateway.vercel.sh",
+  "api.anyapi.com",
+  "api.twitter.com",
+  "api.x.com",
+  "twitter.com",
+  "x.com",
+]);
+
+const originalFetch = globalThis.fetch;
+if (typeof originalFetch === "function") {
+  globalThis.fetch = async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    let urlString = "";
+    if (typeof input === "string") {
+      urlString = input;
+    } else if (input instanceof URL) {
+      urlString = input.href;
+    } else if (input && typeof input === "object" && "url" in input) {
+      urlString = String((input as Request).url);
+    }
+
+    try {
+      const parsed = new URL(urlString);
+      for (const blocked of BLOCKED_HOSTS) {
+        if (parsed.hostname === blocked || parsed.hostname.endsWith("." + blocked)) {
+          throw new Error(
+            `[Network Test Safeguard] Unmocked outbound request to '${parsed.hostname}' blocked during test execution. All external provider calls must be mocked in tests.`
+          );
+        }
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("[Network Test Safeguard]")) {
+        throw err;
+      }
+    }
+
+    return originalFetch(input, init);
+  };
+}

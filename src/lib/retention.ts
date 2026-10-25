@@ -11,7 +11,7 @@ import {
   xPosts,
 } from "@/db/schema";
 import { competitorMentions } from "@/db/schema/competitors";
-import { assertAuthorizedOperator, type OperatorContext } from "./sourcePolicy";
+import { assertAuthorizedOperator, ensureSourcePolicyFresh, type OperatorContext } from "./sourcePolicy";
 import { daysAgo } from "./time";
 import { RETENTION_DAYS } from "./tiers";
 
@@ -193,6 +193,7 @@ export async function planHistoricalPurge(
     throw new OperatorApprovalRequiredError("historical_bulk_purge");
   }
   if (options.operatorContext) {
+    await ensureSourcePolicyFresh();
     assertAuthorizedOperator(options.operatorContext);
   }
   return {

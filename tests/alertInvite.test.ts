@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 const sent = vi.fn();
@@ -21,7 +22,17 @@ describe("invite tokens", () => {
  * database, because the eligibility query is the claim.
  */
 describeDb("alert invites", () => {
-  beforeEach(() => sent.mockReset());
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
+    sent.mockReset();
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
 
   async function person(opts: { leads: number; alert?: boolean; ageMs?: number; postedDaysAgo?: number }) {
     const { db } = await import("@/db");

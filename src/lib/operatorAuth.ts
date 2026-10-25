@@ -12,7 +12,12 @@ export const VALID_OPERATOR_ROLES: readonly OperatorRole[] = [
   "legal_counsel",
 ] as const;
 
-export type OperatorCredentialAction = "PROVISION" | "REGISTER" | "ROTATE" | "REVOKE";
+export type OperatorCredentialAction =
+  | "PROVISION"
+  | "REGISTER"
+  | "ROTATE"
+  | "REVOKE"
+  | "RECOVERY";
 
 export interface VerifiedOperator {
   credentialId: string;
@@ -259,6 +264,15 @@ export const DEFAULT_TEST_CREDENTIALS: readonly OperatorCredentialRecord[] = Obj
   }),
 ]);
 
+export type OperatorBootstrapStatus = {
+  isBootstrapped: boolean;
+  bootstrappedAt?: string | null;
+  bootstrappedBy?: string | null;
+  recoveryCount: number;
+  lastRecoveryAt?: string | null;
+  lastRecoveryReason?: string | null;
+};
+
 export interface OperatorCredentialStore {
   getCredential(credentialId: string): Promise<OperatorCredentialRecord | null>;
   getAllCredentials(): Promise<OperatorCredentialRecord[]>;
@@ -280,6 +294,19 @@ export interface OperatorCredentialStore {
   checkInvalidated?(sinceMs: number): boolean;
   readStateSync?(): OperatorCredentialRecord[];
   resetToDefaults?(): Promise<void>;
+  getBootstrapStatus?(): Promise<OperatorBootstrapStatus>;
+  recordBootstrap?(
+    credentials: OperatorCredentialRecord[],
+    auditEvents: OperatorCredentialAuditEvent[],
+    bootstrappedBy: string,
+  ): Promise<void>;
+  recordRecovery?(
+    credentials: OperatorCredentialRecord[],
+    auditEvents: OperatorCredentialAuditEvent[],
+    recoveredBy: string,
+    reason: string,
+  ): Promise<void>;
+  ready?(): Promise<void>;
 }
 
 const operatorFileStoreEventBus = new EventEmitter();
@@ -339,6 +366,10 @@ export class PersistentFileOperatorCredentialStore implements OperatorCredential
     } catch {
       return { credentials: {}, auditEvents: [] };
     }
+  }
+
+  async ready(): Promise<void> {
+    this.ensureInitialized();
   }
 
   readStateSync(): OperatorCredentialRecord[] {
@@ -422,6 +453,87 @@ export class PersistentFileOperatorCredentialStore implements OperatorCredential
     return state.auditEvents.filter((e) => e.credentialId === credentialId.trim());
   }
 
+  async getBootstrapStatus(): Promise<OperatorBootstrapStatus> {
+    const state = this.readState() as {
+      credentials: Record<string, OperatorCredentialRecord>;
+      auditEvents: OperatorCredentialAuditEvent[];
+      bootstrapState?: OperatorBootstrapStatus;
+    };
+    return (
+      state.bootstrapState ?? {
+        isBootstrapped: false,
+        bootstrappedAt: null,
+        bootstrappedBy: null,
+        recoveryCount: 0,
+        lastRecoveryAt: null,
+        lastRecoveryReason: null,
+      }
+    );
+  }
+
+  async recordBootstrap(
+    credentials: OperatorCredentialRecord[],
+    auditEvents: OperatorCredentialAuditEvent[],
+    bootstrappedBy: string,
+  ): Promise<void> {
+    const state = this.readState() as {
+      credentials: Record<string, OperatorCredentialRecord>;
+      auditEvents: OperatorCredentialAuditEvent[];
+      bootstrapState?: OperatorBootstrapStatus;
+    };
+    if (state.bootstrapState?.isBootstrapped) {
+      throw new OperatorAuthorizationError(
+        "Operator credentials have already been bootstrapped. Subsequent bootstrap attempts are prohibited. Use emergency recovery instead.",
+      );
+    }
+    for (const cred of credentials) {
+      state.credentials[cred.credentialId] = cred;
+    }
+    for (const event of auditEvents) {
+      state.auditEvents.push(event);
+    }
+    state.bootstrapState = {
+      isBootstrapped: true,
+      bootstrappedAt: new Date().toISOString(),
+      bootstrappedBy,
+      recoveryCount: 0,
+      lastRecoveryAt: null,
+      lastRecoveryReason: null,
+    };
+    this.writeState(state);
+    operatorFileStoreEventBus.emit("invalidation", { filePath: this.filePath });
+  }
+
+  async recordRecovery(
+    credentials: OperatorCredentialRecord[],
+    auditEvents: OperatorCredentialAuditEvent[],
+    recoveredBy: string,
+    reason: string,
+  ): Promise<void> {
+    const state = this.readState() as {
+      credentials: Record<string, OperatorCredentialRecord>;
+      auditEvents: OperatorCredentialAuditEvent[];
+      bootstrapState?: OperatorBootstrapStatus;
+    };
+    const currentCount = state.bootstrapState?.recoveryCount ?? 0;
+    for (const cred of credentials) {
+      state.credentials[cred.credentialId] = cred;
+    }
+    for (const event of auditEvents) {
+      state.auditEvents.push(event);
+    }
+    state.bootstrapState = {
+      isBootstrapped: true,
+      bootstrappedAt: state.bootstrapState?.bootstrappedAt ?? new Date().toISOString(),
+      bootstrappedBy: state.bootstrapState?.bootstrappedBy ?? recoveredBy,
+      recoveryCount: currentCount + 1,
+      lastRecoveryAt: new Date().toISOString(),
+      lastRecoveryReason: reason,
+    };
+    this.writeState(state);
+    operatorFileStoreEventBus.emit("invalidation", { filePath: this.filePath });
+  }
+
   async resetToDefaults(): Promise<void> {
     if (fs.existsSync(this.filePath)) {
       try {
@@ -462,47 +574,72 @@ export class PersistentFileOperatorCredentialStore implements OperatorCredential
  */
 export class DrizzleOperatorCredentialStore implements OperatorCredentialStore {
   private invalidationListeners: Set<InvalidationCallback> = new Set();
-  private isListening = false;
+  private listeningPromise: Promise<void> | null = null;
   private unsubscribeClient?: () => Promise<void>;
+
+  async ready(): Promise<void> {
+    await this.ensureListening();
+  }
 
   subscribeInvalidation(callback: InvalidationCallback): () => void {
     this.invalidationListeners.add(callback);
-    void this.ensureListening();
+    void this.ensureListening().catch(() => {});
     return () => {
       this.invalidationListeners.delete(callback);
     };
   }
 
-  private async ensureListening(): Promise<void> {
-    if (this.isListening) return;
-    this.isListening = true;
-    try {
-      const postgres = (await import("postgres")).default;
-      const { config } = await import("@/lib/config");
-      const client = postgres(config().DATABASE_URL, { max: 1, idle_timeout: 0 });
-      const { unlisten } = await client.listen("operator_credential_invalidation", (msg) => {
-        try {
-          const parsed = typeof msg === "string" ? JSON.parse(msg) : msg;
-          for (const listener of this.invalidationListeners) {
-            listener(parsed);
-          }
-        } catch {
-          for (const listener of this.invalidationListeners) {
-            listener({});
-          }
-        }
-      });
-      this.unsubscribeClient = async () => {
-        try {
-          await unlisten();
-          await client.end({ timeout: 1 });
-        } catch {
-          // ignore
-        }
-      };
-    } catch {
-      this.isListening = false;
+  private ensureListening(): Promise<void> {
+    if (this.listeningPromise) {
+      return this.listeningPromise;
     }
+    this.listeningPromise = (async () => {
+      try {
+        const postgres = (await import("postgres")).default;
+        const { config } = await import("@/lib/config");
+        const client = postgres(config().DATABASE_URL, {
+          max: 1,
+          idle_timeout: 0,
+          onclose: () => {
+            for (const listener of this.invalidationListeners) {
+              listener({});
+            }
+          },
+        });
+        const { unlisten } = await client.listen(
+          "operator_credential_invalidation",
+          (msg) => {
+            try {
+              const parsed = typeof msg === "string" ? JSON.parse(msg) : msg;
+              for (const listener of this.invalidationListeners) {
+                listener(parsed);
+              }
+            } catch {
+              for (const listener of this.invalidationListeners) {
+                listener({});
+              }
+            }
+          },
+          () => {
+            for (const listener of this.invalidationListeners) {
+              listener({});
+            }
+          },
+        );
+        this.unsubscribeClient = async () => {
+          try {
+            await unlisten();
+            await client.end({ timeout: 1 });
+          } catch {
+            // ignore
+          }
+        };
+      } catch (err) {
+        this.listeningPromise = null;
+        throw err;
+      }
+    })();
+    return this.listeningPromise;
   }
 
   async getCredential(credentialId: string): Promise<OperatorCredentialRecord | null> {
@@ -717,6 +854,230 @@ export class DrizzleOperatorCredentialStore implements OperatorCredentialStore {
       createdAt: r.createdAt.toISOString(),
     }));
   }
+
+  async getBootstrapStatus(): Promise<OperatorBootstrapStatus> {
+    const { db } = await import("@/db");
+    const { operatorBootstrapState } = await import("@/db/schema/sourceAuth");
+    const { eq } = await import("drizzle-orm");
+
+    const rows = await db()
+      .select()
+      .from(operatorBootstrapState)
+      .where(eq(operatorBootstrapState.id, "singleton"))
+      .limit(1);
+
+    const row = rows[0];
+    return {
+      isBootstrapped: row?.isBootstrapped ?? false,
+      bootstrappedAt: row?.bootstrappedAt ? row.bootstrappedAt.toISOString() : null,
+      bootstrappedBy: row?.bootstrappedBy ?? null,
+      recoveryCount: row?.recoveryCount ?? 0,
+      lastRecoveryAt: row?.lastRecoveryAt ? row.lastRecoveryAt.toISOString() : null,
+      lastRecoveryReason: row?.lastRecoveryReason ?? null,
+    };
+  }
+
+  async recordBootstrap(
+    credentials: OperatorCredentialRecord[],
+    auditEvents: OperatorCredentialAuditEvent[],
+    bootstrappedBy: string,
+  ): Promise<void> {
+    const { db } = await import("@/db");
+    const {
+      operatorBootstrapState,
+      operatorCredentials,
+      operatorCredentialAuditEvents,
+    } = await import("@/db/schema/sourceAuth");
+    const { eq, sql } = await import("drizzle-orm");
+
+    await db().transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(operatorBootstrapState)
+        .where(eq(operatorBootstrapState.id, "singleton"))
+        .for("update");
+
+      const existing = rows[0];
+      if (existing?.isBootstrapped) {
+        throw new OperatorAuthorizationError(
+          "Operator credentials have already been bootstrapped. Subsequent bootstrap attempts are prohibited. Use emergency recovery instead.",
+        );
+      }
+
+      await tx
+        .insert(operatorBootstrapState)
+        .values({
+          id: "singleton",
+          isBootstrapped: true,
+          bootstrappedAt: new Date(),
+          bootstrappedBy,
+          recoveryCount: 0,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: operatorBootstrapState.id,
+          set: {
+            isBootstrapped: true,
+            bootstrappedAt: new Date(),
+            bootstrappedBy,
+            updatedAt: new Date(),
+          },
+        });
+
+      for (const cred of credentials) {
+        await tx
+          .insert(operatorCredentials)
+          .values({
+            credentialId: cred.credentialId,
+            operatorId: cred.operatorId,
+            role: cred.role,
+            secretHash: cred.secretHash,
+            revoked: cred.revoked,
+            revokedAt: cred.revokedAt ? new Date(cred.revokedAt) : null,
+            revokedBy: cred.revokedBy ?? null,
+            revocationReason: cred.revocationReason ?? null,
+            expiresAt: cred.expiresAt ? new Date(cred.expiresAt) : null,
+            description: cred.description ?? null,
+            updatedAt: new Date(),
+          })
+          .onConflictDoUpdate({
+            target: operatorCredentials.credentialId,
+            set: {
+              operatorId: cred.operatorId,
+              role: cred.role,
+              secretHash: cred.secretHash,
+              revoked: cred.revoked,
+              revokedAt: cred.revokedAt ? new Date(cred.revokedAt) : null,
+              revokedBy: cred.revokedBy ?? null,
+              revocationReason: cred.revocationReason ?? null,
+              expiresAt: cred.expiresAt ? new Date(cred.expiresAt) : null,
+              description: cred.description ?? null,
+              updatedAt: new Date(),
+            },
+          });
+      }
+
+      for (const event of auditEvents) {
+        await tx.insert(operatorCredentialAuditEvents).values({
+          id: event.id,
+          credentialId: event.credentialId,
+          action: event.action,
+          performedBy: event.performedBy,
+          actorRole: event.actorRole,
+          reason: event.reason,
+          previousState: event.previousState ?? null,
+          newState: event.newState,
+          details: event.details ?? null,
+          createdAt: new Date(event.createdAt),
+        });
+      }
+
+      await tx.execute(
+        sql`SELECT pg_notify('operator_credential_invalidation', ${JSON.stringify({ action: "BOOTSTRAP" })});`,
+      );
+    });
+  }
+
+  async recordRecovery(
+    credentials: OperatorCredentialRecord[],
+    auditEvents: OperatorCredentialAuditEvent[],
+    recoveredBy: string,
+    reason: string,
+  ): Promise<void> {
+    const { db } = await import("@/db");
+    const {
+      operatorBootstrapState,
+      operatorCredentials,
+      operatorCredentialAuditEvents,
+    } = await import("@/db/schema/sourceAuth");
+    const { eq, sql } = await import("drizzle-orm");
+
+    await db().transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(operatorBootstrapState)
+        .where(eq(operatorBootstrapState.id, "singleton"))
+        .for("update");
+
+      const existing = rows[0];
+      const nextRecoveryCount = (existing?.recoveryCount ?? 0) + 1;
+
+      await tx
+        .insert(operatorBootstrapState)
+        .values({
+          id: "singleton",
+          isBootstrapped: true,
+          bootstrappedAt: existing?.bootstrappedAt ?? new Date(),
+          bootstrappedBy: existing?.bootstrappedBy ?? recoveredBy,
+          recoveryCount: nextRecoveryCount,
+          lastRecoveryAt: new Date(),
+          lastRecoveryReason: reason,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: operatorBootstrapState.id,
+          set: {
+            isBootstrapped: true,
+            recoveryCount: nextRecoveryCount,
+            lastRecoveryAt: new Date(),
+            lastRecoveryReason: reason,
+            updatedAt: new Date(),
+          },
+        });
+
+      for (const cred of credentials) {
+        await tx
+          .insert(operatorCredentials)
+          .values({
+            credentialId: cred.credentialId,
+            operatorId: cred.operatorId,
+            role: cred.role,
+            secretHash: cred.secretHash,
+            revoked: cred.revoked,
+            revokedAt: cred.revokedAt ? new Date(cred.revokedAt) : null,
+            revokedBy: cred.revokedBy ?? null,
+            revocationReason: cred.revocationReason ?? null,
+            expiresAt: cred.expiresAt ? new Date(cred.expiresAt) : null,
+            description: cred.description ?? null,
+            updatedAt: new Date(),
+          })
+          .onConflictDoUpdate({
+            target: operatorCredentials.credentialId,
+            set: {
+              operatorId: cred.operatorId,
+              role: cred.role,
+              secretHash: cred.secretHash,
+              revoked: cred.revoked,
+              revokedAt: cred.revokedAt ? new Date(cred.revokedAt) : null,
+              revokedBy: cred.revokedBy ?? null,
+              revocationReason: cred.revocationReason ?? null,
+              expiresAt: cred.expiresAt ? new Date(cred.expiresAt) : null,
+              description: cred.description ?? null,
+              updatedAt: new Date(),
+            },
+          });
+      }
+
+      for (const event of auditEvents) {
+        await tx.insert(operatorCredentialAuditEvents).values({
+          id: event.id,
+          credentialId: event.credentialId,
+          action: event.action,
+          performedBy: event.performedBy,
+          actorRole: event.actorRole,
+          reason: event.reason,
+          previousState: event.previousState ?? null,
+          newState: event.newState,
+          details: event.details ?? null,
+          createdAt: new Date(event.createdAt),
+        });
+      }
+
+      await tx.execute(
+        sql`SELECT pg_notify('operator_credential_invalidation', ${JSON.stringify({ action: "RECOVERY" })});`,
+      );
+    });
+  }
 }
 
 export function createDefaultOperatorCredentialStore(): OperatorCredentialStore {
@@ -840,11 +1201,17 @@ export class OperatorCredentialRegistry {
     this.bindStoreListeners();
   }
 
+  async ready(): Promise<void> {
+    if (typeof this.store.ready === "function") {
+      await this.store.ready();
+    }
+  }
+
   getCredential(credentialId: string): OperatorCredentialRecord | null {
     if (!this.storeHealthy) {
       return null;
     }
-    if (this.store.checkInvalidated && this.store.checkInvalidated(this.lastSyncMs)) {
+    if (this.isCacheExpired()) {
       if (typeof this.store.readStateSync === "function") {
         try {
           const creds = this.store.readStateSync();
@@ -855,10 +1222,12 @@ export class OperatorCredentialRegistry {
           }
           this.lastSyncMs = Date.now();
         } catch {
-          this.cache.delete(credentialId.trim());
+          this.cache.clear();
+          return null;
         }
       } else {
-        this.cache.delete(credentialId.trim());
+        this.cache.clear();
+        return null;
       }
     }
     const found = this.cache.get(credentialId.trim());
@@ -869,7 +1238,7 @@ export class OperatorCredentialRegistry {
     if (!this.storeHealthy) {
       return [];
     }
-    if (this.store.checkInvalidated && this.store.checkInvalidated(this.lastSyncMs)) {
+    if (this.isCacheExpired()) {
       if (typeof this.store.readStateSync === "function") {
         try {
           const creds = this.store.readStateSync();
@@ -880,8 +1249,12 @@ export class OperatorCredentialRegistry {
           }
           this.lastSyncMs = Date.now();
         } catch {
-          // ignore
+          this.cache.clear();
+          return [];
         }
+      } else {
+        this.cache.clear();
+        return [];
       }
     }
     return Array.from(this.cache.values()).map(cloneAndFreezeCredential);
@@ -891,10 +1264,7 @@ export class OperatorCredentialRegistry {
     if (!token || typeof token !== "string" || !token.trim()) {
       return null;
     }
-    if (!this.storeHealthy) {
-      return null;
-    }
-    if (this.store.checkInvalidated && this.store.checkInvalidated(this.lastSyncMs)) {
+    if (!this.storeHealthy || this.isCacheExpired()) {
       if (typeof this.store.readStateSync === "function") {
         try {
           const creds = this.store.readStateSync();
@@ -906,7 +1276,11 @@ export class OperatorCredentialRegistry {
           this.lastSyncMs = Date.now();
         } catch {
           this.cache.clear();
+          return null;
         }
+      } else {
+        this.cache.clear();
+        return null;
       }
     }
     const tokenHash = hashOperatorSecret(token);
@@ -967,6 +1341,7 @@ export class OperatorCredentialRegistry {
       expiresAt?: string | null;
     },
   ): Promise<OperatorCredentialRecord> {
+    await this.ensureFresh();
     const verified = verifyOperatorCredentials(operatorContext, "system_administrator");
     validateSecretTokenStrength(params.secret);
 
@@ -1015,6 +1390,7 @@ export class OperatorCredentialRegistry {
       revokedAt?: string;
     },
   ): Promise<OperatorCredentialRecord> {
+    await this.ensureFresh();
     const verified = verifyOperatorCredentials(operatorContext, [
       "system_administrator",
       "compliance_officer",
@@ -1077,6 +1453,7 @@ export class OperatorCredentialRegistry {
       reason: string;
     },
   ): Promise<OperatorCredentialRecord> {
+    await this.ensureFresh();
     const verified = verifyOperatorCredentials(operatorContext, "system_administrator");
     validateSecretTokenStrength(params.newSecret);
 
@@ -1137,11 +1514,22 @@ export class OperatorCredentialRegistry {
         "Bootstrap provisioning is disabled: OPERATOR_BOOTSTRAP_KEY is not configured.",
       );
     }
+    if (!params.bootstrapKey || !params.bootstrapKey.trim()) {
+      throw new OperatorAuthorizationError("Bootstrap recovery key must be provided.");
+    }
     if (!safeCompareStrings(configuredKey.trim(), params.bootstrapKey.trim())) {
       throw new OperatorAuthorizationError("Invalid bootstrap recovery key.");
     }
 
-    const results: OperatorCredentialRecord[] = [];
+    if (!Array.isArray(params.credentials) || params.credentials.length === 0) {
+      throw new OperatorAuthorizationError(
+        "At least one operator credential must be provided for bootstrap.",
+      );
+    }
+
+    const validatedCreds: OperatorCredentialRecord[] = [];
+    const auditEvents: OperatorCredentialAuditEvent[] = [];
+
     for (const cred of params.credentials) {
       validateSecretTokenStrength(cred.secret);
       const record: OperatorCredentialRecord = {
@@ -1159,6 +1547,8 @@ export class OperatorCredentialRegistry {
         updatedAt: new Date().toISOString(),
       };
       const validated = validateOperatorCredentialRecord(record);
+      validatedCreds.push(validated);
+
       const auditEvent: OperatorCredentialAuditEvent = {
         id: `cred_audit_${randomUUID()}`,
         credentialId: validated.credentialId,
@@ -1170,13 +1560,142 @@ export class OperatorCredentialRegistry {
         newState: { ...validated },
         createdAt: new Date().toISOString(),
       };
-      await this.store.saveCredential(validated, auditEvent);
-      const frozen = cloneAndFreezeCredential(validated);
-      this.cache.set(validated.credentialId, frozen);
+      auditEvents.push(auditEvent);
+    }
+
+    if (this.store.recordBootstrap) {
+      await this.store.recordBootstrap(validatedCreds, auditEvents, "emergency_bootstrap");
+    } else {
+      for (let i = 0; i < validatedCreds.length; i++) {
+        await this.store.saveCredential(validatedCreds[i], auditEvents[i]);
+      }
+    }
+
+    const results: OperatorCredentialRecord[] = [];
+    for (const val of validatedCreds) {
+      const frozen = cloneAndFreezeCredential(val);
+      this.cache.set(val.credentialId, frozen);
       results.push(frozen);
     }
     this.revision++;
     return results;
+  }
+
+  async emergencyRecoverCredentials(params: {
+    recoveryKey: string;
+    confirmRecovery: boolean;
+    reason: string;
+    credentials: Array<{
+      credentialId: string;
+      operatorId: string;
+      role: OperatorRole;
+      secret: string;
+      description?: string;
+      expiresAt?: string | null;
+    }>;
+  }): Promise<OperatorCredentialRecord[]> {
+    if (!params.confirmRecovery) {
+      throw new OperatorAuthorizationError(
+        "Emergency credential recovery requires explicit confirmation (confirmRecovery: true).",
+      );
+    }
+    if (!params.reason || !params.reason.trim()) {
+      throw new OperatorAuthorizationError(
+        "Emergency credential recovery requires a documented audit reason.",
+      );
+    }
+
+    const configuredKey =
+      process.env.OPERATOR_RECOVERY_KEY || process.env.OPERATOR_BOOTSTRAP_KEY;
+    if (!configuredKey || !configuredKey.trim()) {
+      throw new OperatorAuthorizationError(
+        "OPERATOR_RECOVERY_KEY or OPERATOR_BOOTSTRAP_KEY is not configured. Emergency recovery is disabled.",
+      );
+    }
+    if (!params.recoveryKey || !params.recoveryKey.trim()) {
+      throw new OperatorAuthorizationError("Emergency recovery key must be provided.");
+    }
+    if (!safeCompareStrings(configuredKey.trim(), params.recoveryKey.trim())) {
+      throw new OperatorAuthorizationError("Invalid emergency recovery key.");
+    }
+
+    if (!Array.isArray(params.credentials) || params.credentials.length === 0) {
+      throw new OperatorAuthorizationError(
+        "At least one operator credential must be provided for recovery.",
+      );
+    }
+
+    const validatedCreds: OperatorCredentialRecord[] = [];
+    const auditEvents: OperatorCredentialAuditEvent[] = [];
+
+    for (const cred of params.credentials) {
+      validateSecretTokenStrength(cred.secret);
+      const record: OperatorCredentialRecord = {
+        credentialId: cred.credentialId.trim(),
+        operatorId: cred.operatorId.trim(),
+        role: cred.role,
+        secretHash: hashOperatorSecret(cred.secret),
+        revoked: false,
+        revokedAt: null,
+        revokedBy: null,
+        revocationReason: null,
+        expiresAt: cred.expiresAt ?? null,
+        description: cred.description ?? null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const validated = validateOperatorCredentialRecord(record);
+      validatedCreds.push(validated);
+
+      const auditEvent: OperatorCredentialAuditEvent = {
+        id: `cred_audit_${randomUUID()}`,
+        credentialId: validated.credentialId,
+        action: "RECOVERY",
+        performedBy: "emergency_recovery",
+        actorRole: "system_administrator",
+        reason: params.reason,
+        previousState: null,
+        newState: { ...validated },
+        createdAt: new Date().toISOString(),
+      };
+      auditEvents.push(auditEvent);
+    }
+
+    if (this.store.recordRecovery) {
+      await this.store.recordRecovery(
+        validatedCreds,
+        auditEvents,
+        "emergency_recovery",
+        params.reason,
+      );
+    } else {
+      for (let i = 0; i < validatedCreds.length; i++) {
+        await this.store.saveCredential(validatedCreds[i], auditEvents[i]);
+      }
+    }
+
+    const results: OperatorCredentialRecord[] = [];
+    for (const val of validatedCreds) {
+      const frozen = cloneAndFreezeCredential(val);
+      this.cache.set(val.credentialId, frozen);
+      results.push(frozen);
+    }
+    this.revision++;
+    return results;
+  }
+
+  async getBootstrapStatus(): Promise<OperatorBootstrapStatus> {
+    if (this.store.getBootstrapStatus) {
+      return this.store.getBootstrapStatus();
+    }
+    return {
+      isBootstrapped: false,
+      bootstrappedAt: null,
+      bootstrappedBy: null,
+      recoveryCount: 0,
+      lastRecoveryAt: null,
+      lastRecoveryReason: null,
+    };
   }
 
   async getAuditHistory(credentialId?: string): Promise<OperatorCredentialAuditEvent[]> {
@@ -1360,6 +1879,7 @@ export async function operatorRegisterCredential(
     expiresAt?: string | null;
   },
 ): Promise<OperatorCredentialRecord> {
+  await ensureOperatorCredentialFresh();
   return globalOperatorCredentialRegistry.registerCredential(operatorContext, params);
 }
 
@@ -1371,6 +1891,7 @@ export async function operatorRevokeCredential(
     revokedAt?: string;
   },
 ): Promise<OperatorCredentialRecord> {
+  await ensureOperatorCredentialFresh();
   return globalOperatorCredentialRegistry.revokeCredential(operatorContext, params);
 }
 
@@ -1382,6 +1903,7 @@ export async function operatorRotateCredential(
     reason: string;
   },
 ): Promise<OperatorCredentialRecord> {
+  await ensureOperatorCredentialFresh();
   return globalOperatorCredentialRegistry.rotateCredential(operatorContext, params);
 }
 
@@ -1398,6 +1920,26 @@ export async function bootstrapOperatorCredentials(params: {
   reason?: string;
 }): Promise<OperatorCredentialRecord[]> {
   return globalOperatorCredentialRegistry.bootstrapCredentials(params);
+}
+
+export async function emergencyRecoverOperatorCredentials(params: {
+  recoveryKey: string;
+  confirmRecovery: boolean;
+  reason: string;
+  credentials: Array<{
+    credentialId: string;
+    operatorId: string;
+    role: OperatorRole;
+    secret: string;
+    description?: string;
+    expiresAt?: string | null;
+  }>;
+}): Promise<OperatorCredentialRecord[]> {
+  return globalOperatorCredentialRegistry.emergencyRecoverCredentials(params);
+}
+
+export async function getOperatorBootstrapStatus(): Promise<OperatorBootstrapStatus> {
+  return globalOperatorCredentialRegistry.getBootstrapStatus();
 }
 
 export async function getOperatorCredentialAuditHistory(

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 /**
@@ -7,6 +8,16 @@ import { describeDb, makeProject, makeUser } from "./fixtures/db";
  * with only the AnyAPI client faked. It skips when DATABASE_URL is absent.
  */
 describeDb("fetchShared against a database", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   it("calls AnyAPI once and reuses the run for the second caller", async () => {
     const { db } = await import("@/db");
     const { redditPosts, searchRuns, usageLedger, users } = await import("@/db/schema");

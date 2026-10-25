@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import type { StoredPost } from "@/lib/reddit/store";
 import { judgeAnswers, triageAnswers } from "./jevAnswers";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
@@ -76,8 +77,11 @@ describeDb("runBackfill against a database", () => {
   let runBackfill: typeof import("@/lib/scan/backfill").runBackfill;
   let upsertPosts: typeof import("@/lib/reddit/store").upsertPosts;
   let eq: typeof import("drizzle-orm").eq;
+  let cleanupAuth: (() => Promise<void>) | undefined;
 
   beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("all");
+    cleanupAuth = auth.cleanup;
     ({ db } = await import("@/db"));
     schema = await import("@/db/schema");
     ({ runBackfill } = await import("@/lib/scan/backfill"));
@@ -91,6 +95,10 @@ describeDb("runBackfill against a database", () => {
       mock.mockReset();
     }
     fetchAuthorProfile.mockResolvedValue({ value: null, reused: true, costUsd: 0 });
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
   });
 
   async function project(phrasings: string[] = []) {

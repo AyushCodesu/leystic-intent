@@ -1,4 +1,5 @@
-import { expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { db } from "@/db";
 import { handledThreads, leadMutes, llmUsage, xEvaluations, xLeads, xPosts } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
@@ -16,6 +17,16 @@ const good = {
 };
 
 describeDb("the ranked X window", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("x");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   async function fixture() {
     const user = await makeUser();
     return makeProject(user.id, { leadFilters: { mustMention: ["recorder"], xMinScore: 80 } });

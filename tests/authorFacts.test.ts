@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makePost, makeProject, makeUser } from "./fixtures/db";
 
 /**
@@ -12,6 +13,17 @@ import { describeDb, makePost, makeProject, makeUser } from "./fixtures/db";
 const CREATED_UTC = 1_500_000_000;
 
 describeDb("author facts from the profile call", () => {
+  let uninstallAuth: (() => Promise<void>) | null = null;
+
+  beforeAll(async () => {
+    uninstallAuth = (await installTestAuthorizedSource("reddit")).cleanup;
+  });
+
+  afterAll(async () => {
+    if (uninstallAuth) {
+      await uninstallAuth();
+    }
+  });
   async function context(username: string) {
     const { db } = await import("@/db");
     const schema = await import("@/db/schema");

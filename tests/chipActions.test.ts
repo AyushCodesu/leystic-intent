@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 /**
@@ -28,11 +29,15 @@ async function fixture() {
 describeDb("the plan's chips", () => {
   // The tier caps are what chipsOn counts against, and a self-hosted install has none.
   let selfHosted: string | undefined;
-  beforeEach(() => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
     selfHosted = process.env.SELF_HOSTED;
     process.env.SELF_HOSTED = "false";
   });
-  afterEach(() => {
+  afterEach(async () => {
+    await cleanupAuth?.();
     if (selfHosted === undefined) {
       delete process.env.SELF_HOSTED;
     } else {
