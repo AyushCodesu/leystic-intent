@@ -324,33 +324,44 @@ To ensure software cannot inadvertently violate authorization boundaries, the re
 
 ### 4.1 Operator Authentication, Operation Identity, and Revocation Consistency
 
-1. **Restricted Server-Side Operator Credential Registry (`src/lib/operatorAuth.ts`)**:
-   * Administrative mutations (`operatorRegisterRecord`, `operatorApproveRecord`, `operatorRevokeRecord`) require verification through `verifyOperatorCredentials`.
-   * Caller-supplied `operatorId` and `role` strings are never trusted on their own. Identity and allowed roles (`system_administrator`, `compliance_officer`, `legal_counsel`) are resolved strictly from server-side registered credentials.
-   * Credentials store SHA-256 hashes of secrets compared using constant-time `timingSafeEqual`.
-   * Supports credential revocation (`revoked: true`) and expiration (`expiresAt`).
-   * In production (`NODE_ENV === "production"`), mutations require both a configured `OPERATOR_SECRET_KEY` and registered operator credentials. Unconfigured environments fail closed.
-   * Unblocking a previously `BLOCKED` or `EXPIRED` record strictly requires verified `legal_counsel` or `compliance_officer` role, explicit `unblockConfirmed: true`, and an updated `evidenceReference`.
-   * Actor identity and role in append-only audit events are derived directly from the verified credential result.
+1. **Durable Server-Side Operator Credential Registry (`src/lib/operatorAuth.ts`, `src/db/schema/sourceAuth.ts`)**:
+   * Administrative mutations (`operatorRegisterRecord`, `operatorApproveRecord`, `operatorRevokeRecord`) and credential operations (`operatorRegisterCredential`, `operatorRevokeCredential`, `operatorRotateCredential`) require verification through `verifyOperatorCredentials`.
+   * Operator credentials are fully persisted in durable storage (`operator_credentials` table in PostgreSQL; `PersistentFileOperatorCredentialStore` for isolated test runs). Plaintext secrets are never stored; only cryptographic SHA-256 hashes are persisted.
+   * Credential records undergo strict validation via `validateOperatorCredentialRecord()`:
+     * Non-empty, trimmed `credentialId` and `operatorId` (rejecting placeholder values like `anon` or strings containing `unknown`).
+     * Permitted role matching `VALID_OPERATOR_ROLES` (`system_administrator`, `compliance_officer`, `legal_counsel`). Loose type casts are rejected.
+     * Well-formed 64-character lowercase hexadecimal SHA-256 hash regex (`/^[a-f0-9]{64}$/`).
+     * Explicit boolean `revoked` state.
+     * Revocation timestamp `revokedAt` is required and strictly validated if `revoked: true`; prohibited if `revoked: false`.
+     * Expiration timestamp `expiresAt` is validated as a legitimate date string when present.
+   * Secret token strength validation via `validateSecretTokenStrength()` enforces minimum 32 characters in production (16 characters in test) with entropy checks preventing trivial or repeated patterns.
+   * Caller-supplied `operatorId` and `role` strings are never trusted on their own; identity and permitted roles are resolved strictly from server-side registered credentials. Role elevation attempts fail closed.
+   * Constant-time comparison using `crypto.timingSafeEqual` prevents timing side-channel attacks during secret hash and master key validation. Plaintext secrets and hashes are never logged.
+   * Production mode (`NODE_ENV === "production"`) never seeds default or predictable test credentials.
+   * Unrestricted mutations are closed: credential registration and rotation require `system_administrator`; revocation requires `system_administrator` or `compliance_officer`. Unblocking a `BLOCKED` or `EXPIRED` record requires `legal_counsel` or `compliance_officer`.
+   * Emergency bootstrapping and recovery: `bootstrapOperatorCredentials()` provisions initial administrator and compliance identities using `OPERATOR_BOOTSTRAP_KEY` with strict record validation and immutable `PROVISION` audit ledger events.
+   * Dual-control master secret semantics: `OPERATOR_SECRET_KEY` acts as a mandatory deployment-level kill switch in production (missing secret fails all administrative mutations closed). When passed in context, it is verified against the environment variable using constant-time string comparison, while never overriding individual operator identity or role.
+   * Test injection helpers (`__testOnlyRegisterOperatorCredential`, `__testOnlyRegisterRecord`) throw an error when executed in `NODE_ENV === "production"`.
 
-2. **Mandatory Explicit Operation Identity (`src/lib/reddit/fetch.ts`)**:
+2. **Durable Operator Credential Audit Ledger (`operator_credential_audit_events`, `drizzle/0044_operator_credentials.sql`)**:
+   * Append-only audit history tracks every credential action (`PROVISION`, `REGISTER`, `ROTATE`, `REVOKE`).
+   * Row-level trigger `trg_prevent_operator_credential_audit_events_mutation` blocks `UPDATE` and `DELETE`.
+   * Statement-level trigger `trg_prevent_operator_credential_audit_events_truncate` (`BEFORE TRUNCATE`) blocks `TRUNCATE`.
+   * SQL privileges `REVOKE TRUNCATE, DELETE, UPDATE ON "operator_credential_audit_events" FROM PUBLIC;` ensure table immutability even against direct SQL execution.
+
+3. **Mandatory Explicit Operation Identity (`src/lib/reddit/fetch.ts`)**:
    * Every managed acquisition through `fetchShared()` requires an explicit, recognized `operationId` (`SourceOperationId`) in its operation context.
    * Production inference fallbacks have been removed.
    * `operationForFetch()` validates exact alignment across all 5 dimensions: `operationId`, `sourceId`, `sku`, `kind`, `purpose`, and `scope`.
    * Attempts by callers to override an operation's purpose or scope are rejected immediately.
    * Legacy inference is isolated to `__testOnlyInferOperationForFetch()`, which throws in production.
 
-3. **Cross-Worker Revocation Consistency**:
-   * PostgreSQL real-time invalidation: `DrizzleSourceAuthStore` emits `SELECT pg_notify('source_auth_invalidation', ...)` inside the mutation transaction.
-   * Invalidation listeners immediately evict stale cache entries across worker processes.
+4. **Cross-Worker Revocation Consistency**:
+   * PostgreSQL real-time invalidation: `DrizzleSourceAuthStore` and `DrizzleOperatorCredentialStore` emit `pg_notify` notifications inside mutation transactions (`source_auth_invalidation` and `operator_credential_invalidation`).
+   * Invalidation listeners immediately evict stale cache entries across all worker processes upon transaction commit.
    * Bounded staleness window: `DEFAULT_MAX_STALENESS_MS = 2000` enforces regular re-hydration on all read paths even if notifications are delayed.
-   * Fail-closed on failure: If the durable store is disconnected or fails validation, `storeHealthy` is marked false, cache is cleared, and all protected calls are blocked fail-closed.
-   * In-memory/file simulations: `PersistentFileSourceAuthStore` coordinates cross-instance invalidation via a shared event bus and synchronous file modification time checks.
-
-4. **Immutable Audit Ledger & Truncate Guard (`drizzle/0043_source_authorization_registry.sql`)**:
-   * Row-level trigger `trg_prevent_source_auth_audit_events_mutation` blocks `UPDATE` and `DELETE`.
-   * Statement-level trigger `trg_prevent_source_auth_audit_events_truncate` (`BEFORE TRUNCATE`) blocks `TRUNCATE`.
-   * Database privilege level: `REVOKE TRUNCATE, DELETE, UPDATE ON "source_auth_audit_events" FROM PUBLIC;` prevents privilege-level ledger wiping.
+   * Fail-closed on failure: If the durable store is disconnected or fails validation, `storeHealthy` is marked false, caches are cleared, and all protected calls are blocked fail-closed.
+   * In-memory/file simulations: `PersistentFileOperatorCredentialStore` coordinates cross-instance invalidation via a shared event bus and synchronous file modification time checks.
 
 ---
 

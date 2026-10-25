@@ -309,6 +309,13 @@
       "when": 1790896700000,
       "tag": "0043_source_authorization_registry",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1790896800000,
+      "tag": "0044_operator_credentials",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { index, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, index, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 export type SourceAuthStatus = "PENDING" | "APPROVED" | "BLOCKED" | "EXPIRED";
 
@@ -82,5 +82,60 @@ export const sourceAuthAuditEvents = pgTable(
   (t) => [
     index("source_auth_audit_events_record_id_idx").on(t.recordId),
     index("source_auth_audit_events_created_at_idx").on(t.createdAt),
+  ],
+);
+
+export type OperatorRole = "system_administrator" | "compliance_officer" | "legal_counsel";
+
+/**
+ * Authoritative persisted operator credentials.
+ * Binds cryptographic secret hashes to verified identities and permitted roles.
+ */
+export const operatorCredentials = pgTable(
+  "operator_credentials",
+  {
+    credentialId: text("credential_id").primaryKey(),
+    operatorId: text("operator_id").notNull(),
+    role: text("role").notNull().$type<OperatorRole>(),
+    secretHash: text("secret_hash").notNull(),
+    revoked: boolean("revoked").notNull().default(false),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: text("revoked_by"),
+    revocationReason: text("revocation_reason"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    description: text("description"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("operator_credentials_operator_id_idx").on(t.operatorId),
+    index("operator_credentials_role_idx").on(t.role),
+    index("operator_credentials_revoked_idx").on(t.revoked),
+  ],
+);
+
+/**
+ * Durable append-only audit trail recording all operator credential
+ * provisioning, registration, rotation, and revocation events.
+ */
+export const operatorCredentialAuditEvents = pgTable(
+  "operator_credential_audit_events",
+  {
+    id: text("id").primaryKey(),
+    credentialId: text("credential_id")
+      .notNull()
+      .references(() => operatorCredentials.credentialId, { onDelete: "restrict" }),
+    action: text("action").notNull(), // "PROVISION" | "REGISTER" | "ROTATE" | "REVOKE"
+    performedBy: text("performed_by").notNull(),
+    actorRole: text("actor_role").notNull(),
+    reason: text("reason").notNull(),
+    previousState: jsonb("previous_state").$type<Record<string, unknown>>(),
+    newState: jsonb("new_state").$type<Record<string, unknown>>().notNull(),
+    details: jsonb("details").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("operator_credential_audit_events_credential_id_idx").on(t.credentialId),
+    index("operator_credential_audit_events_created_at_idx").on(t.createdAt),
   ],
 );

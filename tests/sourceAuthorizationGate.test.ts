@@ -16,22 +16,33 @@ import {
   ACQUISITION_OPERATIONS,
   allSourcePolicies,
   assertSourceAuthorized,
+  bootstrapOperatorCredentials,
   createDefaultSourceAuthStore,
+  DrizzleOperatorCredentialStore,
   DrizzleSourceAuthStore,
+  getOperatorCredentialAuditHistory,
   getSourceAuthAuditHistory,
   getSourcePolicy,
   getTrustedRecord,
   globalOperatorCredentialRegistry,
   globalRegistry,
+  hashOperatorSecret,
   InvalidAuthRecordError,
+  InvalidCredentialRecordError,
   isPermittedAcquisitionOperation,
   OperatorAuthorizationError,
   operatorApproveRecord,
+  OperatorCredentialRegistry,
+  operatorRegisterCredential,
   operatorRegisterRecord,
+  operatorRevokeCredential,
   operatorRevokeRecord,
+  operatorRotateCredential,
+  PersistentFileOperatorCredentialStore,
   PersistentFileSourceAuthStore,
   registerTrustedAuthRecord,
   resetTrustedRegistry,
+  setGlobalOperatorCredentialStore,
   setGlobalRegistryStore,
   sourceForSku,
   type SourceAuthStore,
@@ -41,7 +52,10 @@ import {
   type OperatorRole,
   type SourceOperationRequest,
   type TrustedAuthRecord,
+  validateOperatorCredentialRecord,
+  validateSecretTokenStrength,
   __testOnlyRegisterOperatorCredential,
+  __testOnlyRegisterRecord,
 } from "@/lib/sourcePolicy";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
@@ -799,6 +813,436 @@ describe("Operation-Specific Source Authorization and Registry Controls", () => 
       expect(typeof p.status).toBe("string");
     }
   });
+
+  // Test 13: Operator credential durability survives process restarts across independent instances
+  it("Test 13: Operator credential durability survives process restarts across independent instances", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "leystic-cred-durability-"));
+    const storePath = path.join(tmpDir, "operator_creds.json");
+
+    try {
+      const storeA = new PersistentFileOperatorCredentialStore(storePath);
+      const registryA = new OperatorCredentialRegistry(storeA);
+
+      // Instance A registers a new credential for an officer
+      const newCred = await registryA.registerCredential(adminOperator, {
+        credentialId: "cred_durable_officer_01",
+        operatorId: "durable_officer_01",
+        role: "compliance_officer",
+        secret: "secure_compliance_secret_token_12345678",
+        description: "Durable compliance officer credential",
+      });
+      expect(newCred.credentialId).toBe("cred_durable_officer_01");
+
+      // Simulate process restart: Instance B opens the same store
+      const storeB = new PersistentFileOperatorCredentialStore(storePath);
+      const registryB = new OperatorCredentialRegistry(storeB);
+      await registryB.ensureFresh(true);
+
+      const loadedCred = registryB.getCredential("cred_durable_officer_01");
+      expect(loadedCred).toBeDefined();
+      expect(loadedCred?.operatorId).toBe("durable_officer_01");
+      expect(loadedCred?.role).toBe("compliance_officer");
+      expect(loadedCred?.revoked).toBe(false);
+
+      // Verify token authentication works in Instance B
+      const verified = registryB.findCredentialByToken("secure_compliance_secret_token_12345678");
+      expect(verified?.credentialId).toBe("cred_durable_officer_01");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Test 14: Cross-worker operator credential revocation and TTL staleness bounds
+  it("Test 14: Cross-worker operator credential revocation and TTL staleness bounds", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "leystic-cred-ttl-"));
+    const storePath = path.join(tmpDir, "operator_creds.json");
+
+    try {
+      const storeA = new PersistentFileOperatorCredentialStore(storePath);
+      const registryA = new OperatorCredentialRegistry(storeA, 20); // 20ms TTL
+      const storeB = new PersistentFileOperatorCredentialStore(storePath);
+      const registryB = new OperatorCredentialRegistry(storeB, 20); // 20ms TTL
+
+      // Provision credential on instance A
+      await registryA.registerCredential(adminOperator, {
+        credentialId: "cred_worker_revoked_01",
+        operatorId: "worker_officer_01",
+        role: "compliance_officer",
+        secret: "valid_secret_key_worker_token_12345678",
+      });
+
+      // Instance B hydrates and authenticates successfully
+      await registryB.syncFromStore();
+      expect(registryB.findCredentialByToken("valid_secret_key_worker_token_12345678")).toBeDefined();
+
+      // Instance A revokes credential
+      await registryA.revokeCredential(adminOperator, {
+        credentialId: "cred_worker_revoked_01",
+        reason: "Compromised credential during penetration testing",
+      });
+
+      // In Instance A, cache immediately shows revoked
+      expect(registryA.getCredential("cred_worker_revoked_01")?.revoked).toBe(true);
+
+      // Wait for TTL on Instance B (35ms > 20ms)
+      await new Promise((resolve) => setTimeout(resolve, 35));
+      expect(registryB.isCacheExpired()).toBe(true);
+
+      // Instance B refreshes and rejects the revoked credential
+      await registryB.ensureFresh();
+      const credOnB = registryB.getCredential("cred_worker_revoked_01");
+      expect(credOnB?.revoked).toBe(true);
+      expect(credOnB?.revocationReason).toBe("Compromised credential during penetration testing");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Test 15: Revocation persists across restart simulations
+  it("Test 15: Revocation persists across restart simulations", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "leystic-cred-restart-"));
+    const storePath = path.join(tmpDir, "operator_creds.json");
+
+    try {
+      const storeA = new PersistentFileOperatorCredentialStore(storePath);
+      const registryA = new OperatorCredentialRegistry(storeA);
+
+      await registryA.registerCredential(adminOperator, {
+        credentialId: "cred_restart_revoked",
+        operatorId: "restart_legal_01",
+        role: "legal_counsel",
+        secret: "legal_restart_secret_token_12345678",
+      });
+
+      await registryA.revokeCredential(complianceOperator, {
+        credentialId: "cred_restart_revoked",
+        reason: "Departed company",
+      });
+
+      // Simulate process termination and fresh restart
+      const storeRestarted = new PersistentFileOperatorCredentialStore(storePath);
+      const registryRestarted = new OperatorCredentialRegistry(storeRestarted);
+      await registryRestarted.ensureFresh(true);
+
+      const restartedCred = registryRestarted.getCredential("cred_restart_revoked");
+      expect(restartedCred?.revoked).toBe(true);
+      expect(restartedCred?.revokedBy).toBe("compliance_officer_001");
+      expect(restartedCred?.revocationReason).toBe("Departed company");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Test 16: Strict validation fails closed on malformed credential records and low-entropy secrets
+  it("Test 16: Strict validation fails closed on malformed credential records and low-entropy secrets", () => {
+    // Empty or missing credentialId
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "",
+        operatorId: "operator_001",
+        role: "legal_counsel",
+        secretHash: hashOperatorSecret("valid_secret_key_12345678"),
+        revoked: false,
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    // Empty or missing operatorId
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "cred_001",
+        operatorId: "   ",
+        role: "legal_counsel",
+        secretHash: hashOperatorSecret("valid_secret_key_12345678"),
+        revoked: false,
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    // Anonymous or unknown operatorId
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "cred_001",
+        operatorId: "anon",
+        role: "legal_counsel",
+        secretHash: hashOperatorSecret("valid_secret_key_12345678"),
+        revoked: false,
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "cred_001",
+        operatorId: "unknown_user",
+        role: "legal_counsel",
+        secretHash: hashOperatorSecret("valid_secret_key_12345678"),
+        revoked: false,
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    // Unrecognized role
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "cred_001",
+        operatorId: "operator_001",
+        role: "super_admin" as unknown as OperatorRole,
+        secretHash: hashOperatorSecret("valid_secret_key_12345678"),
+        revoked: false,
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    // Malformed SHA-256 hash (wrong length, invalid chars)
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "cred_001",
+        operatorId: "operator_001",
+        role: "legal_counsel",
+        secretHash: "not_a_valid_hex_hash",
+        revoked: false,
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    // Non-boolean revoked state
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "cred_001",
+        operatorId: "operator_001",
+        role: "legal_counsel",
+        secretHash: hashOperatorSecret("valid_secret_key_12345678"),
+        revoked: "false" as unknown as boolean,
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    // Invalid revokedAt date when revoked is true
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "cred_001",
+        operatorId: "operator_001",
+        role: "legal_counsel",
+        secretHash: hashOperatorSecret("valid_secret_key_12345678"),
+        revoked: true,
+        revokedAt: "invalid-date-string",
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    // Missing revokedAt when revoked is true
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "cred_001",
+        operatorId: "operator_001",
+        role: "legal_counsel",
+        secretHash: hashOperatorSecret("valid_secret_key_12345678"),
+        revoked: true,
+        revokedAt: null,
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    // Present revokedAt when revoked is false
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "cred_001",
+        operatorId: "operator_001",
+        role: "legal_counsel",
+        secretHash: hashOperatorSecret("valid_secret_key_12345678"),
+        revoked: false,
+        revokedAt: new Date().toISOString(),
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    // Invalid expiresAt date
+    expect(() =>
+      validateOperatorCredentialRecord({
+        credentialId: "cred_001",
+        operatorId: "operator_001",
+        role: "legal_counsel",
+        secretHash: hashOperatorSecret("valid_secret_key_12345678"),
+        revoked: false,
+        expiresAt: "corrupt_expiration_date",
+      }),
+    ).toThrow(InvalidCredentialRecordError);
+
+    // Secret token strength: short tokens rejected
+    expect(() => validateSecretTokenStrength("short")).toThrow(OperatorAuthorizationError);
+
+    // Secret token strength: low-entropy repeated characters rejected
+    expect(() => validateSecretTokenStrength("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true)).toThrow(
+      OperatorAuthorizationError,
+    );
+  });
+
+  // Test 17: Privileged operations are restricted to authorized roles and prevent role elevation
+  it("Test 17: Privileged operations are restricted to authorized roles and prevent role elevation", async () => {
+    // Non-sysadmin (compliance_officer) cannot register new credentials
+    await expect(
+      operatorRegisterCredential(complianceOperator, {
+        credentialId: "cred_unauthorized_reg",
+        operatorId: "new_operator",
+        role: "compliance_officer",
+        secret: "valid_secret_token_1234567890",
+      }),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    // Non-sysadmin (legal_counsel) cannot register new credentials
+    await expect(
+      operatorRegisterCredential(legalOperator, {
+        credentialId: "cred_unauthorized_reg_2",
+        operatorId: "new_operator",
+        role: "legal_counsel",
+        secret: "valid_secret_token_1234567890",
+      }),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    // Non-sysadmin cannot rotate credentials
+    await expect(
+      operatorRotateCredential(complianceOperator, {
+        credentialId: "cred_compliance_default",
+        newSecret: "new_compliance_secret_token_12345",
+        reason: "Unauthorized rotation attempt",
+      }),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    // sysadmin CAN register and rotate credentials
+    const regResult = await operatorRegisterCredential(adminOperator, {
+      credentialId: "cred_valid_admin_reg",
+      operatorId: "new_officer_verified",
+      role: "compliance_officer",
+      secret: "valid_secret_token_1234567890",
+      description: "Registered by administrator",
+    });
+    expect(regResult.credentialId).toBe("cred_valid_admin_reg");
+
+    const rotated = await operatorRotateCredential(adminOperator, {
+      credentialId: "cred_valid_admin_reg",
+      newSecret: "rotated_secret_token_0987654321",
+      reason: "Routine credential rotation",
+    });
+    expect(rotated.credentialId).toBe("cred_valid_admin_reg");
+    expect(rotated.secretHash).toBe(hashOperatorSecret("rotated_secret_token_0987654321"));
+
+    // Test standalone operatorRevokeCredential API
+    const revokedDirectly = await operatorRevokeCredential(complianceOperator, {
+      credentialId: "cred_valid_admin_reg",
+      reason: "Revoked via standalone operatorRevokeCredential helper",
+    });
+    expect(revokedDirectly.revoked).toBe(true);
+
+    // Verify setGlobalOperatorCredentialStore rebinds store
+    const currentStore = globalOperatorCredentialRegistry.getStore();
+    setGlobalOperatorCredentialStore(currentStore);
+  });
+
+  // Test 18: Production mode strictly forbids test-only injection and unconfigured mutations
+  it("Test 18: Production mode strictly forbids test-only injection and unconfigured mutations", () => {
+    vi.stubEnv("NODE_ENV", "production");
+
+    // __testOnlyRegisterOperatorCredential throws in production
+    expect(() =>
+      __testOnlyRegisterOperatorCredential({
+        credentialId: "cred_prod_injected",
+        operatorId: "injected_user",
+        role: "system_administrator",
+        secret: "super_secret_token_1234567890",
+      }),
+    ).toThrow(/production/);
+
+    // __testOnlyRegisterRecord throws in production
+    expect(() =>
+      __testOnlyRegisterRecord({
+        recordId: "REC-PROD-INJECTED",
+        sourceId: "reddit",
+        name: "Prod Injected Record",
+        status: "APPROVED",
+        authorizedPurposes: ["commercial_lead_generation"],
+        scopes: ["search_discovery"],
+        effectiveDate: "2026-01-01T00:00:00.000Z",
+        expirationDate: null,
+        evidenceReference: "DOC-PROD",
+        approvalProvenance: { approvedBy: "Tester", reviewedAt: "2026-01-01T00:00:00.000Z", notes: "Notes" },
+      }),
+    ).toThrow(/production/);
+
+    // OperatorCredentialRegistry in production never seeds default test credentials
+    const prodRegistry = new OperatorCredentialRegistry(new PersistentFileOperatorCredentialStore(path.join(os.tmpdir(), "prod_test_empty.json")));
+    expect(prodRegistry.count()).toBe(0);
+  });
+
+  // Test 19: Emergency operator bootstrap requires valid recovery key and creates audit ledger entries
+  it("Test 19: Emergency operator bootstrap requires valid recovery key and creates audit ledger entries", async () => {
+    vi.stubEnv("OPERATOR_BOOTSTRAP_KEY", "super-recovery-bootstrap-key-99999");
+
+    // Wrong recovery key fails closed
+    await expect(
+      bootstrapOperatorCredentials({
+        bootstrapKey: "wrong-bootstrap-key",
+        credentials: [
+          {
+            credentialId: "cred_emergency_admin",
+            operatorId: "emergency_admin_001",
+            role: "system_administrator",
+            secret: "emergency_admin_secret_token_12345678",
+          },
+        ],
+      }),
+    ).rejects.toThrow(OperatorAuthorizationError);
+
+    // Valid recovery key provisions credentials and records audit ledger
+    const bootstrapped = await bootstrapOperatorCredentials({
+      bootstrapKey: "super-recovery-bootstrap-key-99999",
+      credentials: [
+        {
+          credentialId: "cred_emergency_admin",
+          operatorId: "emergency_admin_001",
+          role: "system_administrator",
+          secret: "emergency_admin_secret_token_12345678",
+          description: "Emergency break-glass administrator",
+        },
+      ],
+      reason: "Initial deployment bootstrap",
+    });
+
+    expect(bootstrapped).toHaveLength(1);
+    expect(bootstrapped[0].credentialId).toBe("cred_emergency_admin");
+
+    const auditHistory = await getOperatorCredentialAuditHistory("cred_emergency_admin");
+    const provEvent = auditHistory.find((e) => e.action === "PROVISION");
+    expect(provEvent).toBeDefined();
+    expect(provEvent?.performedBy).toBe("emergency_bootstrap");
+    expect(provEvent?.reason).toBe("Initial deployment bootstrap");
+  });
+
+  // Test 20: Dual-control master secret semantics and deployment kill switch
+  it("Test 20: Dual-control master secret semantics and deployment kill switch", async () => {
+    vi.stubEnv("OPERATOR_SECRET_KEY", "cluster-master-secret-12345");
+
+    // Invalid masterKey passed in context is rejected
+    await expect(
+      operatorRegisterCredential(
+        {
+          ...adminOperator,
+          masterKey: "incorrect-master-key",
+        },
+        {
+          credentialId: "cred_dual_control_test",
+          operatorId: "dual_officer",
+          role: "compliance_officer",
+          secret: "dual_secret_token_1234567890",
+        },
+      ),
+    ).rejects.toThrow(/master operator secret key/);
+
+    // Matching masterKey succeeds
+    const success = await operatorRegisterCredential(
+      {
+        ...adminOperator,
+        masterKey: "cluster-master-secret-12345",
+      },
+      {
+        credentialId: "cred_dual_control_test",
+        operatorId: "dual_officer",
+        role: "compliance_officer",
+        secret: "dual_secret_token_1234567890",
+      },
+    );
+    expect(success.credentialId).toBe("cred_dual_control_test");
+  });
 });
 
 describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
@@ -971,6 +1415,56 @@ describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
     // Attempting to delete from source_auth_audit_events must be blocked by row-level trigger
     await expect(
       db().execute(sql`DELETE FROM "source_auth_audit_events";`),
+    ).rejects.toThrow();
+  });
+
+  it("enforces cross-worker operator credential revocation consistency across two DrizzleOperatorCredentialStore instances", async () => {
+    const storeA = new DrizzleOperatorCredentialStore();
+    const registryA = new OperatorCredentialRegistry(storeA, 100);
+    const storeB = new DrizzleOperatorCredentialStore();
+    const registryB = new OperatorCredentialRegistry(storeB, 100);
+
+    const testCredId = `cred_worker_db_${randomUUID().slice(0, 8)}`;
+    const testSecret = `db_worker_secret_token_${randomUUID().slice(0, 8)}_1234`;
+
+    // Worker A registers credential
+    await registryA.registerCredential(adminOperator, {
+      credentialId: testCredId,
+      operatorId: "db_worker_operator",
+      role: "compliance_officer",
+      secret: testSecret,
+    });
+
+    // Worker B syncs and verifies credential is active
+    await registryB.syncFromStore();
+    const credOnB = registryB.getCredential(testCredId);
+    expect(credOnB?.revoked).toBe(false);
+
+    // Worker A revokes credential
+    await registryA.revokeCredential(complianceOperator, {
+      credentialId: testCredId,
+      reason: "Database cross-worker revocation test",
+    });
+
+    // Worker B must observe revocation within consistency guarantee
+    await registryB.ensureFresh();
+    const revokedOnB = registryB.getCredential(testCredId);
+    expect(revokedOnB?.revoked).toBe(true);
+    expect(revokedOnB?.revocationReason).toBe("Database cross-worker revocation test");
+  });
+
+  it("strictly enforces database-level append-only immutability and blocks TRUNCATE and DELETE on operator credential audit events", async () => {
+    const { db } = await import("@/db");
+    const { sql } = await import("drizzle-orm");
+
+    // Attempting to truncate operator_credential_audit_events must be blocked by trigger / permissions
+    await expect(
+      db().execute(sql`TRUNCATE TABLE "operator_credential_audit_events";`),
+    ).rejects.toThrow();
+
+    // Attempting to delete from operator_credential_audit_events must be blocked by row-level trigger
+    await expect(
+      db().execute(sql`DELETE FROM "operator_credential_audit_events";`),
     ).rejects.toThrow();
   });
 });

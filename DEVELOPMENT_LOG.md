@@ -967,5 +967,79 @@ Explicit Legal Boundary: Software gates enforce technical restrictions, isolate 
 * `tests/typography.test.ts`: Passed. 0 non-ASCII or em/en dashes.
 * `npm test`: 83 test files passed (804 passed, 283 skipped), 0 failures.
 * `npm run build`: Production build passed (35 static and dynamic routes compiled).
-* `git diff --check`: 0 whitespace errors.
+* `git diff --check`: 0 whitespace errors.---
 
+## 13. Durable Operator Credentials, Strict Record Validation, and Cross-Worker Revocation
+
+### 1. Authoritative Durable Storage (`src/db/schema/sourceAuth.ts`, `drizzle/0044_operator_credentials.sql`)
+* **Durable PostgreSQL Credentials Table (`operator_credentials`)**:
+  * Persists `credentialId`, `operatorId`, `role`, `secretHash`, `revoked`, `revokedAt`, `revokedBy`, `revocationReason`, `expiresAt`, `description`, `createdAt`, `updatedAt`.
+  * Plaintext secrets are never stored; only lowercase 64-character SHA-256 hashes are persisted.
+  * Indexes on `operatorId`, `role`, and `revoked` optimize authentication and revocation queries.
+* **Append-Only Audit Ledger (`operator_credential_audit_events`)**:
+  * Records durable history for `PROVISION`, `REGISTER`, `ROTATE`, and `REVOKE` actions with `performedBy`, `actorRole`, `reason`, `previousState`, `newState`, and `details`.
+  * Database-level immutability enforcement:
+    * Row-level trigger `trg_prevent_operator_credential_audit_events_mutation` blocks `UPDATE` and `DELETE`.
+    * Statement-level trigger `trg_prevent_operator_credential_audit_events_truncate` (`BEFORE TRUNCATE`) blocks `TRUNCATE`.
+    * Privilege revocation: `REVOKE TRUNCATE, DELETE, UPDATE ON "operator_credential_audit_events" FROM PUBLIC;` prevents table wiping even from raw SQL execution.
+* **Drizzle Migration Registration (`drizzle/meta/_journal.json`)**:
+  * Registered migration `0044_operator_credentials` ensuring automatic schema and trigger setup in PostgreSQL CI.
+
+### 2. Strict Record Validation and Token Strength (`src/lib/operatorAuth.ts`)
+* **Strict Validation (`validateOperatorCredentialRecord`)**:
+  * Throws typed `InvalidCredentialRecordError` if any field violates integrity rules.
+  * Enforces non-empty `credentialId` and `operatorId` (rejecting placeholder values like `anon` or strings containing `unknown`).
+  * Enforces permitted roles matching `VALID_OPERATOR_ROLES` (`system_administrator`, `compliance_officer`, `legal_counsel`). Loose type casts are rejected.
+  * Validates secretHash strictly against `/^[a-f0-9]{64}$/`.
+  * Enforces explicit boolean `revoked` state.
+  * Enforces consistent revocation dates: `revokedAt` is required and must be a valid date when `revoked: true`; must be null or undefined when `revoked: false`.
+  * Validates `expiresAt` as a parseable date string when present.
+  * Employs defensive copying and `Object.freeze()` to prevent in-memory mutation.
+* **Token Strength Validation (`validateSecretTokenStrength`)**:
+  * Enforces minimum 32 characters in production (16 characters in test/development).
+  * Validates character entropy, rejecting trivially guessable or single-character repeated tokens.
+* **Timing-Safe Cryptography**:
+  * Uses `crypto.timingSafeEqual` for all hash and secret comparisons (`safeCompareHashes`, `safeCompareStrings`).
+  * Never logs secrets or hashes in error messages or logs.
+
+### 3. Closed Unrestricted Mutation Paths (`src/lib/operatorAuth.ts`)
+* **Role-Restricted Credential APIs**:
+  * `operatorRegisterCredential()`: Restricted to verified `system_administrator`.
+  * `operatorRevokeCredential()`: Restricted to verified `system_administrator` or `compliance_officer`.
+  * `operatorRotateCredential()`: Restricted to verified `system_administrator`.
+* **Zero Production Default Fixtures**:
+  * Production mode (`NODE_ENV === "production"`) never seeds default or predictable test credentials.
+  * Test injection helpers (`__testOnlyRegisterOperatorCredential`, `__testOnlyRegisterRecord`) throw an error if called in production.
+
+### 4. Emergency Bootstrap & Recovery (`src/lib/operatorAuth.ts`)
+* **Initial Provisioning (`bootstrapOperatorCredentials`)**:
+  * Provides a secure initial provisioning and disaster recovery path without requiring pre-existing active credentials.
+  * Authenticates using `process.env.OPERATOR_BOOTSTRAP_KEY` with timing-safe comparison.
+  * Performs strict record validation and records durable `PROVISION` audit events.
+
+### 5. Dual-Control Master Secret Model (`src/lib/operatorAuth.ts`)
+* **Deployment Kill Switch**:
+  * In production, `OPERATOR_SECRET_KEY` must be configured in environment; missing configuration fails all administrative mutations closed immediately.
+* **Dual-Control Verification**:
+  * When callers pass `masterKey` or `operatorSecretKey`, it is verified against `process.env.OPERATOR_SECRET_KEY` using timing-safe comparison.
+  * The shared master key acts as a deployment-level control only and never overrides an individual operator's identity or role.
+
+### 6. Real-Time Cross-Worker Revocation Consistency (`src/lib/operatorAuth.ts`)
+* **PostgreSQL Invalidation**:
+  * `DrizzleOperatorCredentialStore` publishes `operator_credential_invalidation` notifications via `pg_notify` inside the transaction.
+  * Connected worker instances listen via postgres client and invalidate local caches immediately.
+* **Bounded Staleness Window**:
+  * `DEFAULT_MAX_STALENESS_MS = 2000` guarantees caches re-hydrate from durable storage even if notifications are dropped.
+* **Fail-Closed on Store Error**:
+  * If durable store cannot be read, `storeHealthy` is marked false, caches are cleared, and subsequent authentication fails closed.
+* **Isolated Test Store**:
+  * `PersistentFileOperatorCredentialStore` coordinates cross-instance invalidation via shared event bus and file mtime checks for offline test runs.
+
+### 7. Verification Summary
+* `npm run typecheck`: 0 errors.
+* `npm run lint`: 0 problems (0 errors, 0 warnings).
+* `tests/sourceAuthorizationGate.test.ts`: 28 tests (21 passed, 7 skipped pending CI PostgreSQL).
+* `tests/typography.test.ts`: Passed. 0 non-ASCII or em/en dashes.
+* `npm test`: 83 test files passed (812 passed, 285 skipped across 115 test files), 0 failures.
+* `npm run build`: Production build passed (35 static and dynamic routes compiled).
+* `git diff --check`: 0 whitespace errors.

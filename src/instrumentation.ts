@@ -3,8 +3,10 @@ export async function register() {
     try {
       const { initSourcePolicyRegistry } = await import("./lib/sourcePolicy");
       await initSourcePolicyRegistry();
+      const { initOperatorCredentialRegistry } = await import("./lib/operatorAuth");
+      await initOperatorCredentialRegistry();
     } catch (err) {
-      console.error("[Instrumentation] Failed to initialize SourcePolicyRegistry:", err);
+      console.error("[Instrumentation] Failed to initialize registries:", err);
     }
   }
 

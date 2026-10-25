@@ -8,22 +8,64 @@ import {
   type OperatorRole,
   type VerifiedOperator,
   type OperatorCredentialRecord,
+  type OperatorCredentialAuditEvent,
+  type OperatorCredentialAction,
+  type OperatorCredentialStore,
+  type OperatorContext,
+  VALID_OPERATOR_ROLES,
   OperatorAuthorizationError,
+  InvalidCredentialRecordError,
   verifyOperatorCredentials,
   globalOperatorCredentialRegistry,
   hashOperatorSecret,
+  safeCompareHashes,
+  safeCompareStrings,
+  validateSecretTokenStrength,
+  validateOperatorCredentialRecord,
+  operatorRegisterCredential,
+  operatorRevokeCredential,
+  operatorRotateCredential,
+  bootstrapOperatorCredentials,
+  getOperatorCredentialAuditHistory,
+  setGlobalOperatorCredentialStore,
+  initOperatorCredentialRegistry,
+  ensureOperatorCredentialFresh,
   __testOnlyRegisterOperatorCredential,
+  DrizzleOperatorCredentialStore,
+  PersistentFileOperatorCredentialStore,
+  OperatorCredentialRegistry,
 } from "./operatorAuth";
 
 export {
   type OperatorRole,
   type VerifiedOperator,
   type OperatorCredentialRecord,
+  type OperatorCredentialAuditEvent,
+  type OperatorCredentialAction,
+  type OperatorCredentialStore,
+  type OperatorContext,
+  VALID_OPERATOR_ROLES,
   OperatorAuthorizationError,
+  InvalidCredentialRecordError,
   verifyOperatorCredentials,
   globalOperatorCredentialRegistry,
+  OperatorCredentialRegistry,
   hashOperatorSecret,
+  safeCompareHashes,
+  safeCompareStrings,
+  validateSecretTokenStrength,
+  validateOperatorCredentialRecord,
+  operatorRegisterCredential,
+  operatorRevokeCredential,
+  operatorRotateCredential,
+  bootstrapOperatorCredentials,
+  getOperatorCredentialAuditHistory,
+  setGlobalOperatorCredentialStore,
+  initOperatorCredentialRegistry,
+  ensureOperatorCredentialFresh,
   __testOnlyRegisterOperatorCredential,
+  DrizzleOperatorCredentialStore,
+  PersistentFileOperatorCredentialStore,
 };
 
 export type SourceId =
@@ -85,12 +127,6 @@ export type TrustedAuthRecord = {
   updatedAt?: string;
 };
 
-export type OperatorContext = {
-  operatorId?: string;
-  role?: OperatorRole;
-  operatorKey?: string;
-  token?: string;
-};
 
 export type SourceAuthAuditEvent = {
   id: string;
@@ -1545,6 +1581,9 @@ export class SourcePolicyRegistry {
   }
 
   __testOnlyInjectRecord(record: TrustedAuthRecord): void {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("__testOnlyInjectRecord cannot be called in production.");
+    }
     const validated = validateTrustedAuthRecord(record);
     this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
   }
@@ -1583,11 +1622,13 @@ export function setGlobalRegistryStore(store: SourceAuthStore): void {
 /** Explicit runtime hydration hook called at server bootstrap. */
 export async function initSourcePolicyRegistry(): Promise<void> {
   await globalRegistry.ensureFresh(true);
+  await ensureOperatorCredentialFresh(true);
 }
 
 /** Explicit helper to ensure registry is freshly synced from durable store. */
 export async function ensureSourcePolicyFresh(force = false): Promise<void> {
   await globalRegistry.ensureFresh(force);
+  await ensureOperatorCredentialFresh(force);
 }
 
 /** Looks up a trusted record by its stable identifier. Returns an immutable frozen clone. */
@@ -1645,6 +1686,9 @@ export async function getSourceAuthAuditHistory(
 
 /** Test-only helper to register mock records during automated testing. */
 export function __testOnlyRegisterRecord(record: TrustedAuthRecord): void {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("__testOnlyRegisterRecord cannot be called in production.");
+  }
   globalRegistry.__testOnlyInjectRecord(record);
 }
 
