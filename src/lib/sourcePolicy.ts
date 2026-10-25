@@ -796,10 +796,11 @@ export class PersistentFileSourceAuthStore implements SourceAuthStore {
   readonly filePath: string;
 
   constructor(filePath?: string) {
+    const workerSuffix = process.env.VITEST_POOL_ID ? `_${process.env.VITEST_POOL_ID}` : "";
     this.filePath =
       filePath ??
       process.env.SOURCE_AUTH_REGISTRY_PATH ??
-      path.join(os.tmpdir(), "leystic_source_auth_registry.json");
+      path.join(os.tmpdir(), `leystic_source_auth_registry${workerSuffix}.json`);
     this.ensureInitialized();
   }
 
@@ -1356,6 +1357,7 @@ export const DEFAULT_MAX_STALENESS_MS = 2000;
 export class SourcePolicyRegistry {
   private store: SourceAuthStore;
   private cache = new Map<string, TrustedAuthRecord>();
+  private testInjectedRecords = new Map<string, TrustedAuthRecord>();
   private lastSyncMs = 0;
   private readonly maxStalenessMs: number;
   private revision = 0;
@@ -1380,9 +1382,14 @@ export class SourcePolicyRegistry {
     if (this.store.subscribeInvalidation) {
       this.unsubscribeStore = this.store.subscribeInvalidation((payload) => {
         if (payload?.recordId) {
-          this.cache.delete(payload.recordId);
+          if (!this.testInjectedRecords.has(payload.recordId)) {
+            this.cache.delete(payload.recordId);
+          }
         } else {
           this.cache.clear();
+          for (const [id, r] of this.testInjectedRecords) {
+            this.cache.set(id, r);
+          }
         }
         this.lastSyncMs = 0;
         this.revision++;
@@ -1395,6 +1402,9 @@ export class SourcePolicyRegistry {
     for (const record of DEFAULT_TRUSTED_REGISTRY) {
       const validated = validateTrustedAuthRecord(record);
       this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
+    }
+    for (const [id, r] of this.testInjectedRecords) {
+      this.cache.set(id, r);
     }
     this.storeHealthy = true;
     this.isHydrated = true;
@@ -1476,17 +1486,21 @@ export class SourcePolicyRegistry {
             const validated = validateTrustedAuthRecord(r);
             this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
           }
+          for (const [id, r] of this.testInjectedRecords) {
+            this.cache.set(id, r);
+          }
           this.lastSyncMs = Date.now();
         } catch {
           this.cache.clear();
-          return null;
+          const testRec = this.testInjectedRecords.get(recordId.trim());
+          return testRec ? cloneAndFreezeRecord(testRec) : null;
         }
       } else {
-        this.cache.clear();
-        return null;
+        const testRec = this.testInjectedRecords.get(recordId.trim());
+        return testRec ? cloneAndFreezeRecord(testRec) : null;
       }
     }
-    const found = this.cache.get(recordId.trim());
+    const found = this.cache.get(recordId.trim()) ?? this.testInjectedRecords.get(recordId.trim());
     return found ? cloneAndFreezeRecord(found) : null;
   }
 
@@ -1503,17 +1517,23 @@ export class SourcePolicyRegistry {
             const validated = validateTrustedAuthRecord(r);
             this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
           }
+          for (const [id, r] of this.testInjectedRecords) {
+            this.cache.set(id, r);
+          }
           this.lastSyncMs = Date.now();
         } catch {
           this.cache.clear();
-          return [];
+          return Array.from(this.testInjectedRecords.values()).map(cloneAndFreezeRecord);
         }
       } else {
-        this.cache.clear();
-        return [];
+        return Array.from(this.testInjectedRecords.values()).map(cloneAndFreezeRecord);
       }
     }
-    return Array.from(this.cache.values()).map(cloneAndFreezeRecord);
+    const merged = new Map(this.cache);
+    for (const [id, r] of this.testInjectedRecords) {
+      merged.set(id, r);
+    }
+    return Array.from(merged.values()).map(cloneAndFreezeRecord);
   }
 
   async syncFromStore(): Promise<void> {
@@ -1523,6 +1543,9 @@ export class SourcePolicyRegistry {
       for (const record of records) {
         const validated = validateTrustedAuthRecord(record);
         this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
+      }
+      for (const [id, record] of this.testInjectedRecords) {
+        this.cache.set(id, record);
       }
       this.lastSyncMs = Date.now();
       this.isHydrated = true;
@@ -1749,7 +1772,9 @@ export class SourcePolicyRegistry {
       throw new Error("__testOnlyInjectRecord cannot be called in production.");
     }
     const validated = validateTrustedAuthRecord(record);
-    this.cache.set(validated.recordId, cloneAndFreezeRecord(validated));
+    const frozen = cloneAndFreezeRecord(validated);
+    this.testInjectedRecords.set(validated.recordId, frozen);
+    this.cache.set(validated.recordId, frozen);
     this.lastSyncMs = Date.now();
     this.isHydrated = true;
     this.revision++;
@@ -1759,11 +1784,13 @@ export class SourcePolicyRegistry {
     if (process.env.NODE_ENV === "production") {
       throw new Error("__testOnlyRemoveRecord cannot be called in production.");
     }
+    this.testInjectedRecords.delete(recordId.trim());
     this.cache.delete(recordId.trim());
     this.revision++;
   }
 
   async reset(): Promise<void> {
+    this.testInjectedRecords.clear();
     this.seedCacheDefaults();
     this.lastSyncMs = 0;
     if (this.store.resetToDefaults) {

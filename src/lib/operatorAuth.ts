@@ -329,10 +329,11 @@ export class PersistentFileOperatorCredentialStore implements OperatorCredential
   readonly filePath: string;
 
   constructor(filePath?: string) {
+    const workerSuffix = process.env.VITEST_POOL_ID ? `_${process.env.VITEST_POOL_ID}` : "";
     this.filePath =
       filePath ??
       process.env.OPERATOR_CREDENTIAL_REGISTRY_PATH ??
-      path.join(os.tmpdir(), "leystic_operator_credentials.json");
+      path.join(os.tmpdir(), `leystic_operator_credentials${workerSuffix}.json`);
     this.ensureInitialized();
   }
 
@@ -1160,6 +1161,7 @@ export const DEFAULT_MAX_STALENESS_MS = 2000;
 export class OperatorCredentialRegistry {
   private store: OperatorCredentialStore;
   private cache = new Map<string, OperatorCredentialRecord>();
+  private testInjectedCredentials = new Map<string, OperatorCredentialRecord>();
   private lastSyncMs = 0;
   private readonly maxStalenessMs: number;
   private revision = 0;
@@ -1185,9 +1187,14 @@ export class OperatorCredentialRegistry {
     if (this.store.subscribeInvalidation) {
       this.unsubscribeStore = this.store.subscribeInvalidation((payload) => {
         if (payload?.credentialId) {
-          this.cache.delete(payload.credentialId);
+          if (!this.testInjectedCredentials.has(payload.credentialId)) {
+            this.cache.delete(payload.credentialId);
+          }
         } else {
           this.cache.clear();
+          for (const [id, cred] of this.testInjectedCredentials) {
+            this.cache.set(id, cred);
+          }
         }
         this.lastSyncMs = 0;
         this.revision++;
@@ -1207,6 +1214,9 @@ export class OperatorCredentialRegistry {
     for (const cred of DEFAULT_TEST_CREDENTIALS) {
       const validated = validateOperatorCredentialRecord(cred);
       this.cache.set(validated.credentialId, cloneAndFreezeCredential(validated));
+    }
+    for (const [id, cred] of this.testInjectedCredentials) {
+      this.cache.set(id, cred);
     }
     this.storeHealthy = true;
     this.isHydrated = true;
@@ -1309,17 +1319,21 @@ export class OperatorCredentialRegistry {
             const validated = validateOperatorCredentialRecord(c);
             this.cache.set(validated.credentialId, cloneAndFreezeCredential(validated));
           }
+          for (const [id, cred] of this.testInjectedCredentials) {
+            this.cache.set(id, cred);
+          }
           this.lastSyncMs = Date.now();
         } catch {
           this.cache.clear();
-          return null;
+          const testCred = this.testInjectedCredentials.get(credentialId.trim());
+          return testCred ? cloneAndFreezeCredential(testCred) : null;
         }
       } else {
-        this.cache.clear();
-        return null;
+        const testCred = this.testInjectedCredentials.get(credentialId.trim());
+        return testCred ? cloneAndFreezeCredential(testCred) : null;
       }
     }
-    const found = this.cache.get(credentialId.trim());
+    const found = this.cache.get(credentialId.trim()) ?? this.testInjectedCredentials.get(credentialId.trim());
     return found ? cloneAndFreezeCredential(found) : null;
   }
 
@@ -1336,17 +1350,23 @@ export class OperatorCredentialRegistry {
             const validated = validateOperatorCredentialRecord(c);
             this.cache.set(validated.credentialId, cloneAndFreezeCredential(validated));
           }
+          for (const [id, cred] of this.testInjectedCredentials) {
+            this.cache.set(id, cred);
+          }
           this.lastSyncMs = Date.now();
         } catch {
           this.cache.clear();
-          return [];
+          return Array.from(this.testInjectedCredentials.values()).map(cloneAndFreezeCredential);
         }
       } else {
-        this.cache.clear();
-        return [];
+        return Array.from(this.testInjectedCredentials.values()).map(cloneAndFreezeCredential);
       }
     }
-    return Array.from(this.cache.values()).map(cloneAndFreezeCredential);
+    const merged = new Map(this.cache);
+    for (const [id, cred] of this.testInjectedCredentials) {
+      merged.set(id, cred);
+    }
+    return Array.from(merged.values()).map(cloneAndFreezeCredential);
   }
 
   findCredentialByToken(token: string): OperatorCredentialRecord | null {
@@ -1362,18 +1382,22 @@ export class OperatorCredentialRegistry {
             const validated = validateOperatorCredentialRecord(c);
             this.cache.set(validated.credentialId, cloneAndFreezeCredential(validated));
           }
+          for (const [id, cred] of this.testInjectedCredentials) {
+            this.cache.set(id, cred);
+          }
           this.lastSyncMs = Date.now();
         } catch {
           this.cache.clear();
-          return null;
         }
-      } else {
-        this.cache.clear();
-        return null;
       }
     }
     const tokenHash = hashOperatorSecret(token);
     for (const cred of this.cache.values()) {
+      if (safeCompareHashes(cred.secretHash, tokenHash)) {
+        return cloneAndFreezeCredential(cred);
+      }
+    }
+    for (const cred of this.testInjectedCredentials.values()) {
       if (safeCompareHashes(cred.secretHash, tokenHash)) {
         return cloneAndFreezeCredential(cred);
       }
@@ -1388,6 +1412,9 @@ export class OperatorCredentialRegistry {
       for (const record of records) {
         const validated = validateOperatorCredentialRecord(record);
         this.cache.set(validated.credentialId, cloneAndFreezeCredential(validated));
+      }
+      for (const [id, cred] of this.testInjectedCredentials) {
+        this.cache.set(id, cred);
       }
       this.lastSyncMs = Date.now();
       this.isHydrated = true;
@@ -1800,6 +1827,7 @@ export class OperatorCredentialRegistry {
   }
 
   async reset(): Promise<void> {
+    this.testInjectedCredentials.clear();
     this.seedCacheDefaults();
     this.loadFromEnvironment();
     this.lastSyncMs = 0;
@@ -1813,7 +1841,21 @@ export class OperatorCredentialRegistry {
       throw new Error("__testOnlyInjectCredential cannot be called in production.");
     }
     const validated = validateOperatorCredentialRecord(cred);
-    this.cache.set(validated.credentialId, cloneAndFreezeCredential(validated));
+    const frozen = cloneAndFreezeCredential(validated);
+    this.testInjectedCredentials.set(validated.credentialId, frozen);
+    this.cache.set(validated.credentialId, frozen);
+    this.lastSyncMs = Date.now();
+    this.isHydrated = true;
+    this.revision++;
+  }
+
+  __testOnlyRemoveCredential(credentialId: string): void {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("__testOnlyRemoveCredential cannot be called in production.");
+    }
+    this.testInjectedCredentials.delete(credentialId.trim());
+    this.cache.delete(credentialId.trim());
+    this.revision++;
   }
 }
 

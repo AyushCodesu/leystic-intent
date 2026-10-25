@@ -144,7 +144,6 @@ export async function installTestAuthorizedSource(
 
   const currentStore = globalRegistry.getStore();
   for (const r of recordsToInject) {
-    globalRegistry.__testOnlyInjectRecord(r);
     try {
       await currentStore.saveRecord(r, {
         id: `seed_${randomUUID().slice(0, 8)}`,
@@ -161,6 +160,7 @@ export async function installTestAuthorizedSource(
     } catch {
       // ignore
     }
+    globalRegistry.__testOnlyInjectRecord(r);
   }
 
   if (process.env.TEST_DB_AVAILABLE === "true") {
