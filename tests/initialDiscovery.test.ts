@@ -43,6 +43,7 @@ describeDb("the initial discovery", () => {
     const auth = await installTestAuthorizedSource("all");
     cleanupAuth = auth.cleanup;
     process.env.SELF_HOSTED = "false";
+    process.env.X_LEADS = "false";
     runDiscovery.mockClear();
     resolveActiveSubreddits.mockClear();
   });

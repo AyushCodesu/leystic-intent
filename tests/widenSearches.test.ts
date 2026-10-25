@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
 /**
@@ -43,9 +44,16 @@ describe("picking searches", () => {
 });
 
 describeDb("widening a project's searches", () => {
-  beforeEach(() => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
     sweepSearchItems.mockReset().mockResolvedValue(MADE);
     runScan.mockReset().mockResolvedValue({});
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
   });
 
   async function project(opts: { keyword?: boolean; discovered?: boolean; leadPostedDaysAgo?: number } = {}) {

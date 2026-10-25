@@ -62,14 +62,20 @@ describe("word matching", () => {
 
 describeDb("a project's filters where leads are read", () => {
   let cleanupAuth: (() => Promise<void>) | undefined;
+  const saved = { X_LEADS: process.env.X_LEADS };
 
   beforeEach(async () => {
-    const auth = await installTestAuthorizedSource("reddit");
+    process.env.X_LEADS = "true";
+    const auth = await installTestAuthorizedSource("all");
     cleanupAuth = auth.cleanup;
   });
 
   afterEach(async () => {
     await cleanupAuth?.();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
   /** A project with these filters, and `muted` as its keyword mutes. */
   async function fixture(

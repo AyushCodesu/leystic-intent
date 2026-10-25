@@ -142,8 +142,25 @@ export async function installTestAuthorizedSource(
     recordsToInject.push(record);
   }
 
+  const currentStore = globalRegistry.getStore();
   for (const r of recordsToInject) {
     globalRegistry.__testOnlyInjectRecord(r);
+    try {
+      await currentStore.saveRecord(r, {
+        id: `seed_${randomUUID().slice(0, 8)}`,
+        recordId: r.recordId,
+        action: "APPROVE",
+        performedBy: "test_suite",
+        actorRole: "compliance_officer",
+        evidenceReference: r.evidenceReference,
+        reason: "Test fixture authorization",
+        previousStatus: null,
+        newStatus: r.status,
+        createdAt: new Date().toISOString(),
+      });
+    } catch {
+      // ignore
+    }
   }
 
   if (process.env.TEST_DB_AVAILABLE === "true") {
@@ -192,6 +209,9 @@ export async function installTestAuthorizedSource(
 
     for (const r of recordsToInject) {
       globalRegistry.__testOnlyRemoveRecord(r.recordId);
+      if (typeof currentStore.deleteRecord === "function") {
+        await currentStore.deleteRecord(r.recordId).catch(() => {});
+      }
     }
 
     if (process.env.TEST_DB_AVAILABLE === "true") {

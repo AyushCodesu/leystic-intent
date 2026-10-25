@@ -1392,12 +1392,20 @@ describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
     const recordOnB = registryB.getRecord(testRecordId);
     expect(recordOnB?.status).toBe("APPROVED");
 
+    // Worker B registers a listener for invalidation before Worker A revokes
+    const invalidationOnB = registryB.waitForInvalidation(
+      (p) => p.recordId === testRecordId,
+    );
+
     // Worker A revokes the record
     await registryA.revokeRecord(complianceOperator, {
       recordId: testRecordId,
       status: "BLOCKED",
       reason: "Cross-worker revocation consistency test",
     });
+
+    // Worker B deterministically awaits the delivered pg_notify invalidation
+    await invalidationOnB;
 
     // Worker B must observe revocation within consistency guarantee
     await registryB.ensureFresh();
@@ -1497,11 +1505,19 @@ describeDb("Database-Backed Retention Cascade Protection and Scans", () => {
     const credOnB = registryB.getCredential(testCredId);
     expect(credOnB?.revoked).toBe(false);
 
+    // Worker B registers a listener for invalidation before Worker A revokes
+    const invalidationOnB = registryB.waitForInvalidation(
+      (p) => p?.credentialId === testCredId,
+    );
+
     // Worker A revokes credential
     await registryA.revokeCredential(complianceOperator, {
       credentialId: testCredId,
       reason: "Database cross-worker revocation test",
     });
+
+    // Worker B deterministically awaits the delivered pg_notify invalidation
+    await invalidationOnB;
 
     // Worker B must observe revocation within consistency guarantee
     await registryB.ensureFresh();

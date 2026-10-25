@@ -75,6 +75,10 @@ const BLOCKED_HOSTS = new Set([
   "api.x.com",
   "twitter.com",
   "x.com",
+  "reddit.com",
+  "oauth.reddit.com",
+  "google.com",
+  "www.google.com",
 ]);
 
 const originalFetch = globalThis.fetch;

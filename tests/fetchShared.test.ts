@@ -104,6 +104,16 @@ function restore(name: string, value: string | undefined): void {
  * leave a user spending their own wallet alone.
  */
 describeDb("the house data cap", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("reddit");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   async function fixture(funding: "house" | `wallet:${string}`, calls: { count: number }) {
     const { db } = await import("@/db");
     const user = await makeUser();
@@ -184,6 +194,16 @@ describeDb("the house data cap", () => {
  * SEO refresh stored before that, under the same key with the link Google gave.
  */
 describeDb("google.search's stored runs", () => {
+  let cleanupAuth: (() => Promise<void>) | undefined;
+
+  beforeEach(async () => {
+    const auth = await installTestAuthorizedSource("google_scraped_serp");
+    cleanupAuth = auth.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanupAuth?.();
+  });
   it("stores canonical thread URLs, and still serves a run stored with Google's own link", async () => {
     const { db } = await import("@/db");
     const { searchRuns, serpResults, users } = await import("@/db/schema");

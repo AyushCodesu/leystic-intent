@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it } from "vitest";
+import { ACQUISITION_OPERATIONS } from "@/lib/sourcePolicy";
 import { installTestAuthorizedSource } from "./fixtures/auth";
 import { describeDb, makeProject, makeUser } from "./fixtures/db";
 
@@ -12,7 +13,7 @@ describeDb("a shared fetch still being stored", () => {
   let cleanupAuth: (() => Promise<void>) | undefined;
 
   beforeEach(async () => {
-    const auth = await installTestAuthorizedSource("reddit");
+    const auth = await installTestAuthorizedSource("google_scraped_serp");
     cleanupAuth = auth.cleanup;
   });
 
@@ -55,6 +56,7 @@ describeDb("a shared fetch still being stored", () => {
       ctx,
       kind: "serp" as const,
       sku: "google.search",
+      operation: ACQUISITION_OPERATIONS.seo_google_search,
       normalizedQuery: query,
       run: async () => {
         calls += 1;
@@ -89,6 +91,7 @@ describeDb("a shared fetch still being stored", () => {
       ctx,
       kind: "serp" as const,
       sku: "google.search",
+      operation: ACQUISITION_OPERATIONS.seo_google_search,
       normalizedQuery: query,
       run: async () => {
         calls += 1;

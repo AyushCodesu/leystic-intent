@@ -64,7 +64,13 @@ export interface OperatorContext {
   operatorSecretKey?: string;
 }
 
-export type InvalidationCallback = (payload?: { credentialId?: string; action?: string }) => void;
+export type InvalidationPayload = {
+  credentialId?: string;
+  action?: string;
+  revoked?: boolean;
+};
+
+export type InvalidationCallback = (payload?: InvalidationPayload) => void;
 
 export class OperatorAuthorizationError extends Error {
   constructor(message: string) {
@@ -307,6 +313,10 @@ export interface OperatorCredentialStore {
     reason: string,
   ): Promise<void>;
   ready?(): Promise<void>;
+  waitForInvalidation?(
+    predicate?: (payload?: InvalidationPayload) => boolean,
+    timeoutMs?: number,
+  ): Promise<InvalidationPayload | undefined>;
 }
 
 const operatorFileStoreEventBus = new EventEmitter();
@@ -546,6 +556,30 @@ export class PersistentFileOperatorCredentialStore implements OperatorCredential
     operatorFileStoreEventBus.emit("invalidation", { filePath: this.filePath });
   }
 
+  waitForInvalidation(
+    predicate?: (payload?: InvalidationPayload) => boolean,
+    timeoutMs = 5000,
+  ): Promise<InvalidationPayload | undefined> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsub();
+        reject(new Error(`Timed out waiting for operator credential invalidation after ${timeoutMs}ms`));
+      }, timeoutMs);
+      const unsub = this.subscribeInvalidation((payload) => {
+        if (settled) return;
+        if (!predicate || predicate(payload)) {
+          settled = true;
+          clearTimeout(timer);
+          unsub();
+          resolve(payload);
+        }
+      });
+    });
+  }
+
   subscribeInvalidation(callback: InvalidationCallback): () => void {
     const handler = (evt: { filePath: string; credentialId?: string; action?: string }) => {
       if (evt.filePath === this.filePath) {
@@ -579,6 +613,30 @@ export class DrizzleOperatorCredentialStore implements OperatorCredentialStore {
 
   async ready(): Promise<void> {
     await this.ensureListening();
+  }
+
+  waitForInvalidation(
+    predicate?: (payload?: InvalidationPayload) => boolean,
+    timeoutMs = 5000,
+  ): Promise<InvalidationPayload | undefined> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsub();
+        reject(new Error(`Timed out waiting for operator credential invalidation after ${timeoutMs}ms`));
+      }, timeoutMs);
+      const unsub = this.subscribeInvalidation((payload) => {
+        if (settled) return;
+        if (!predicate || predicate(payload)) {
+          settled = true;
+          clearTimeout(timer);
+          unsub();
+          resolve(payload);
+        }
+      });
+    });
   }
 
   subscribeInvalidation(callback: InvalidationCallback): () => void {
@@ -1205,6 +1263,37 @@ export class OperatorCredentialRegistry {
     if (typeof this.store.ready === "function") {
       await this.store.ready();
     }
+  }
+
+  waitForInvalidation(
+    predicate?: (payload?: InvalidationPayload) => boolean,
+    timeoutMs = 5000,
+  ): Promise<InvalidationPayload | undefined> {
+    if (typeof this.store.waitForInvalidation === "function") {
+      return this.store.waitForInvalidation(predicate, timeoutMs);
+    }
+    return new Promise((resolve, reject) => {
+      if (!this.store.subscribeInvalidation) {
+        reject(new Error("Store does not support invalidation subscription"));
+        return;
+      }
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsub();
+        reject(new Error(`Timed out waiting for operator credential invalidation after ${timeoutMs}ms`));
+      }, timeoutMs);
+      const unsub = this.store.subscribeInvalidation((payload) => {
+        if (settled) return;
+        if (!predicate || predicate(payload)) {
+          settled = true;
+          clearTimeout(timer);
+          unsub();
+          resolve(payload);
+        }
+      });
+    });
   }
 
   getCredential(credentialId: string): OperatorCredentialRecord | null {

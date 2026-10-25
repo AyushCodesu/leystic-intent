@@ -751,6 +751,9 @@ export type InvalidationPayload = {
   recordId?: string;
   action?: string;
   status?: string;
+  reason?: string;
+  revokedAt?: string;
+  revokedBy?: string;
 };
 
 export type InvalidationCallback = (payload: InvalidationPayload) => void;
@@ -775,6 +778,11 @@ export interface SourceAuthStore {
   checkInvalidated?(sinceMs: number): boolean;
   readStateSync?(): TrustedAuthRecord[];
   ready?(): Promise<void>;
+  deleteRecord?(recordId: string): Promise<void>;
+  waitForInvalidation?(
+    predicate?: (payload: InvalidationPayload) => boolean,
+    timeoutMs?: number,
+  ): Promise<InvalidationPayload>;
 }
 
 const fileStoreEventBus = new EventEmitter();
@@ -934,6 +942,41 @@ export class PersistentFileSourceAuthStore implements SourceAuthStore {
     fileStoreEventBus.emit("invalidation", { filePath: this.filePath });
   }
 
+  async deleteRecord(recordId: string): Promise<void> {
+    const state = this.readState();
+    delete state.records[recordId.trim()];
+    this.writeState(state);
+    fileStoreEventBus.emit("invalidation", {
+      filePath: this.filePath,
+      recordId,
+      action: "DELETE",
+    });
+  }
+
+  waitForInvalidation(
+    predicate?: (payload: InvalidationPayload) => boolean,
+    timeoutMs = 5000,
+  ): Promise<InvalidationPayload> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsub();
+        reject(new Error(`Timed out waiting for source auth invalidation after ${timeoutMs}ms`));
+      }, timeoutMs);
+      const unsub = this.subscribeInvalidation((payload) => {
+        if (settled) return;
+        if (!predicate || predicate(payload)) {
+          settled = true;
+          clearTimeout(timer);
+          unsub();
+          resolve(payload);
+        }
+      });
+    });
+  }
+
   subscribeInvalidation(callback: InvalidationCallback): () => void {
     const handler = (evt: { filePath: string; recordId?: string; action?: string; status?: string }) => {
       if (evt.filePath === this.filePath) {
@@ -967,6 +1010,37 @@ export class DrizzleSourceAuthStore implements SourceAuthStore {
 
   async ready(): Promise<void> {
     await this.ensureListening();
+  }
+
+  async deleteRecord(recordId: string): Promise<void> {
+    const { db } = await import("@/db");
+    const { sourceAuthRecords } = await import("@/db/schema/sourceAuth");
+    const { eq } = await import("drizzle-orm");
+    await db().delete(sourceAuthRecords).where(eq(sourceAuthRecords.recordId, recordId.trim())).catch(() => {});
+  }
+
+  waitForInvalidation(
+    predicate?: (payload: InvalidationPayload) => boolean,
+    timeoutMs = 5000,
+  ): Promise<InvalidationPayload> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsub();
+        reject(new Error(`Timed out waiting for source auth invalidation after ${timeoutMs}ms`));
+      }, timeoutMs);
+      const unsub = this.subscribeInvalidation((payload) => {
+        if (settled) return;
+        if (!predicate || predicate(payload)) {
+          settled = true;
+          clearTimeout(timer);
+          unsub();
+          resolve(payload);
+        }
+      });
+    });
   }
 
   subscribeInvalidation(callback: InvalidationCallback): () => void {
@@ -1214,7 +1288,14 @@ export class DrizzleSourceAuthStore implements SourceAuthStore {
       });
 
       await tx.execute(
-        sql`SELECT pg_notify('source_auth_invalidation', ${JSON.stringify({ recordId: recordId.trim(), action: 'REVOKE', status: revocation.status })});`,
+        sql`SELECT pg_notify('source_auth_invalidation', ${JSON.stringify({
+          recordId: recordId.trim(),
+          action: "REVOKE",
+          status: revocation.status,
+          reason: revocation.reason,
+          revokedBy: revocation.revokedBy,
+          revokedAt: revokedAt.toISOString(),
+        })});`,
       );
 
       return cloneAndFreezeRecord(
@@ -1324,6 +1405,37 @@ export class SourcePolicyRegistry {
     if (typeof this.store.ready === "function") {
       await this.store.ready();
     }
+  }
+
+  waitForInvalidation(
+    predicate?: (payload: InvalidationPayload) => boolean,
+    timeoutMs = 5000,
+  ): Promise<InvalidationPayload> {
+    if (typeof this.store.waitForInvalidation === "function") {
+      return this.store.waitForInvalidation(predicate, timeoutMs);
+    }
+    return new Promise((resolve, reject) => {
+      if (!this.store.subscribeInvalidation) {
+        reject(new Error("Store does not support invalidation subscription"));
+        return;
+      }
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsub();
+        reject(new Error(`Timed out waiting for source auth invalidation after ${timeoutMs}ms`));
+      }, timeoutMs);
+      const unsub = this.store.subscribeInvalidation((payload) => {
+        if (settled) return;
+        if (!predicate || predicate(payload)) {
+          settled = true;
+          clearTimeout(timer);
+          unsub();
+          resolve(payload);
+        }
+      });
+    });
   }
 
   getStore(): SourceAuthStore {

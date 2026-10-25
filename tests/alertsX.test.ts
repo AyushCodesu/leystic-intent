@@ -352,7 +352,7 @@ describeDb("reading X asks for a digest", () => {
   const saved = { X_LEADS: process.env.X_LEADS };
 
   beforeEach(async () => {
-    const auth = await installTestAuthorizedSource("x");
+    const auth = await installTestAuthorizedSource("all");
     cleanupAuth = auth.cleanup;
   });
   afterEach(async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   runEvaluation,
   runLiveEvaluation,
@@ -47,12 +47,14 @@ describe("competitor reasons evaluation harness and fixture regression checks", 
 
   it("asserts that live evaluation fails cleanly without prerequisites and does not fall back to fixture data", async () => {
     const origKey = process.env.OPENROUTER_API_KEY;
+
     try {
       delete process.env.OPENROUTER_API_KEY;
       await expect(runLiveEvaluation()).rejects.toThrow(
         /prerequisite failed: OPENROUTER_API_KEY is not configured/i,
       );
     } finally {
+      vi.restoreAllMocks();
       if (origKey !== undefined) {
         process.env.OPENROUTER_API_KEY = origKey;
       }
@@ -61,12 +63,20 @@ describe("competitor reasons evaluation harness and fixture regression checks", 
 
   it("asserts that live evaluation fails cleanly when database is unreachable and does not fall back to fixture data", async () => {
     const origKey = process.env.OPENROUTER_API_KEY;
+
     try {
+      const dbModule = await import("../src/db");
       process.env.OPENROUTER_API_KEY = "test-key";
+      vi.spyOn(dbModule, "db").mockReturnValue({
+        select: () => {
+          throw new Error("Connection refused (ECONNREFUSED)");
+        },
+      } as unknown as ReturnType<typeof dbModule.db>);
       await expect(runLiveEvaluation()).rejects.toThrow(
         /prerequisite failed: Database/i,
       );
     } finally {
+      vi.restoreAllMocks();
       if (origKey !== undefined) {
         process.env.OPENROUTER_API_KEY = origKey;
       } else {
