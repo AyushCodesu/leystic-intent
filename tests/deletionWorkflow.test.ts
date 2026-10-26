@@ -1218,18 +1218,13 @@ describeDb("targeted deletion and author erasure workflows", () => {
   });
 
   it("validates classification, investigability, and non-PII privacy boundaries of durable identifiers in deletion_audit_log", async () => {
+    setupAdminCredential();
     const { db } = await import("@/db");
     const schema = await import("@/db/schema");
     const { deleteRedditPost, eraseRedditAuthor } = await import("@/lib/retention");
     const { deleteXPost, eraseXAuthor } = await import("@/lib/x/retention");
     const { deleteProject } = await import("@/lib/projects");
     const { and, desc, eq } = await import("drizzle-orm");
-
-    const adminContext = {
-      operatorId: "op_audit_auditor",
-      role: "system_administrator" as const,
-      secretToken: "secret_token_at_least_32_chars_long_12345",
-    };
 
     // 1. DELETE_REDDIT_POST: targetId = postId (operationally necessary for statutory DMCA/court proof)
     const postId = `post_${randomUUID().slice(0, 8)}`;
