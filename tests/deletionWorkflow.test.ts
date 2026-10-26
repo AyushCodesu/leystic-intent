@@ -687,19 +687,33 @@ describeDb("targeted deletion and author erasure workflows", () => {
 
   it("strictly enforces database-level immutability on deletion_audit_log (rejects UPDATE, DELETE, TRUNCATE; permits INSERT)", async () => {
     const { db } = await import("@/db");
+    const schema = await import("@/db/schema");
     const { sql } = await import("drizzle-orm");
 
-    // 1. Prohibit UPDATE
+    const testRowId = `immut_test_${randomUUID().slice(0, 8)}`;
+    // 1. Normal INSERT succeeds
+    await db().insert(schema.deletionAuditLog).values({
+      id: testRowId,
+      action: "TEST_ACTION",
+      actor: "test_actor",
+      actorRole: "system_service",
+      targetType: "test_target",
+      targetId: "test_id",
+      outcome: "SUCCESS",
+      reasonCode: "TEST",
+    });
+
+    // 2. Prohibit UPDATE (row-level trigger fires when row exists)
     await expect(
-      db().execute(sql`UPDATE "deletion_audit_log" SET "outcome" = 'MUTATED' WHERE "action" = 'DOES_NOT_EXIST';`),
+      db().execute(sql`UPDATE "deletion_audit_log" SET "outcome" = 'MUTATED' WHERE "id" = ${testRowId};`),
     ).rejects.toThrow(/append-only audit ledger: UPDATE and DELETE operations are prohibited/);
 
-    // 2. Prohibit DELETE
+    // 3. Prohibit DELETE (row-level trigger fires when row exists)
     await expect(
-      db().execute(sql`DELETE FROM "deletion_audit_log" WHERE "action" = 'DOES_NOT_EXIST';`),
+      db().execute(sql`DELETE FROM "deletion_audit_log" WHERE "id" = ${testRowId};`),
     ).rejects.toThrow(/append-only audit ledger: UPDATE and DELETE operations are prohibited/);
 
-    // 3. Prohibit TRUNCATE
+    // 4. Prohibit TRUNCATE (statement-level trigger)
     await expect(
       db().execute(sql`TRUNCATE TABLE "deletion_audit_log";`),
     ).rejects.toThrow(/append-only audit ledger: TRUNCATE is prohibited/);

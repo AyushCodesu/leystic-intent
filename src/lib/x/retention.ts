@@ -24,7 +24,9 @@ const RUN_HISTORY_DAYS = 90;
  * lose the link.
  */
 export async function deleteExpiredXData(now = new Date()): Promise<{ posts: number; authors: number }> {
+  const safeTargetId = Number.isNaN(now.getTime()) ? new Date().toISOString() : now.toISOString();
   const cutoff = daysAgo(RETENTION_DAYS, now);
+  const safeCutoffStr = Number.isNaN(cutoff.getTime()) ? safeTargetId : cutoff.toISOString();
   const history = daysAgo(RUN_HISTORY_DAYS, now);
 
   let posts = 0;
@@ -70,12 +72,12 @@ export async function deleteExpiredXData(now = new Date()): Promise<{ posts: num
       actor: "system:routine_ttl",
       actorRole: "system_service",
       targetType: "x_retention_batch",
-      targetId: now.toISOString(),
+      targetId: safeTargetId,
       outcome: "SUCCESS",
       reasonCode: "ROUTINE_TTL_EXPIRY",
       details: {
         source: "x",
-        cutoff: cutoff.toISOString(),
+        cutoff: safeCutoffStr,
         deletedPosts: posts,
         deletedAuthors: authorsCount,
         deletedRuns: runsCount,
@@ -91,12 +93,12 @@ export async function deleteExpiredXData(now = new Date()): Promise<{ posts: num
         actor: "system:routine_ttl",
         actorRole: "system_service",
         targetType: "x_retention_batch",
-        targetId: now.toISOString(),
+        targetId: safeTargetId,
         outcome: "FAILURE",
         reasonCode: "ROUTINE_TTL_FAILURE",
         details: {
           source: "x",
-          cutoff: cutoff.toISOString(),
+          cutoff: safeCutoffStr,
           deletedPosts: posts,
           deletedAuthors: authorsCount,
           errorMessage: error instanceof Error ? error.message : "Unknown error",
