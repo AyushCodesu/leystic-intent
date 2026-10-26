@@ -205,6 +205,60 @@ All deletion workflows durably record audit events in `deletion_audit_log` (`ope
 
 - **Transactional Consistency**: Deletion and audit logging share the same PostgreSQL database transaction.
 
+### Durable Identifiers in the Deletion Audit Ledger: Classification, Retention Rationale, and Linkage Risks
+
+An exhaustive review of all writes to `deletion_audit_log` was conducted to classify every persisted field and evaluate the privacy and operational necessity of retained durable identifiers.
+
+#### 1. Exhaustive Audit Field Classification Matrix
+
+| Audit Action | Field Name | Classification | Origin | Operational Necessity & Retention Rationale | Linkage Risks & Mitigations |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `DELETE_REDDIT_POST` | `targetId` (`postId`) | **Operationally Necessary**<br>• Provider-derived<br>• Potentially identifying (external linkage) | Reddit API | **Critical for Statutory Compliance**: Required to prove compliance with external legal and copyright takedowns (DMCA § 512, court orders, platform notices). Without the specific post ID, Leystic cannot demonstrate to copyright claimants, courts, or regulatory authorities that a reported post was purged. | **Linkage Risk**: If the post was public and archived by third parties (e.g. Wayback Machine), the ID can be resolved to external archives.<br>**Mitigation**: Audit record retains zero post title, body, or author username. Table is access-restricted and append-only. |
+| `DELETE_REDDIT_POST` | `actor` / `actorRole` | **Operationally Necessary** | Internal Operator Auth | **Privileged Non-Repudiation**: Records the specific verified operator credential (`operatorId`) and role (`system_administrator`, `compliance_officer`) performing the deletion. | None (Internal administrative identity). |
+| `DELETE_REDDIT_POST` | `details.authorPruned`| **Operationally Necessary** | Runtime execution | Records whether the author row was left orphaned and pruned. | None (Boolean metric). |
+| `DELETE_X_POST` | `targetId` (`tweetId`) | **Operationally Necessary**<br>• Provider-derived<br>• Potentially identifying (external linkage) | X Corp API | **Mandated by Platform Terms**: Required by X Developer Agreement & Policy to prove compliance with compliance firehose deletion events, legal takedowns, and DMCA notices. | **Linkage Risk**: Snowflake ID can be queried against X or external tweet archives if not deleted upstream.<br>**Mitigation**: Contains zero tweet text, handles, or author profile facts. |
+| `DELETE_PROJECT` | `targetId` (`projectId`)| **Operationally Necessary**<br>• Internal synthetic ID | Leystic Database | **Asset Destruction Auditability**: Necessary for SOC 2 Type II / ISO 27001 data destruction audit trails, multi-tenant isolation verification, and workspace dispute investigation. | None (Random UUID, meaningless outside Leystic database). |
+| `DELETE_PROJECT` | `actor` (`userId` or `operatorId`) | **Operationally Necessary**<br>• Potentially identifying (internal customer ID) | Clerk / Leystic Auth | **Accountability & Non-Repudiation**: Proves whether project was deleted by the customer owner (`USER_REQUEST`) or by an administrative operator (`OPERATOR_DELETION`). | **Linkage Risk**: Links internally to customer account (`users.id`).<br>**Mitigation**: Pseudonymous customer ID (e.g. `user_2...`). If customer account undergoes full erasure, key becomes orphaned, preserving non-repudiation without active PII. |
+| `DELETE_PROJECT` | `details.projectOwnerId` | **Operationally Necessary**<br>• Potentially identifying (internal customer ID) | Leystic Database | **Tenancy Governance**: When an operator deletes a project, `actor` is the operator ID; `projectOwnerId` is required to record which customer's project was deleted. | **Linkage Risk**: Same as customer `actor`.<br>**Mitigation**: Retains only pseudonymous internal account ID; no customer business notes or financial facts. |
+| `ERASE_REDDIT_AUTHOR` | `targetId` (`anon-author-...`) | **Operationally Necessary**<br>• Privacy-preserving | Crypto UUID | **Right-to-be-Forgotten Compliance**: Uses an opaque random reference (`anon-author-<uuid>`). Strictly prevents retaining or re-deriving the erased author's username. | **Zero Linkage Risk**: Generated randomly; impossible to reverse or link to public username. |
+| `ERASE_X_AUTHOR` | `targetId` (`anon-author-...`) | **Operationally Necessary**<br>• Privacy-preserving | Crypto UUID | **Right-to-be-Forgotten Compliance**: Uses an opaque random reference (`anon-author-<uuid>`). | **Zero Linkage Risk**: Generated randomly; impossible to reverse or link to Twitter handle. |
+| `TTL_BATCH_CLEANUP` | `targetId` (ISO timestamp) | **Operationally Necessary** | System Clock | **Batch Traceability**: Identifies the routine cleanup execution run timestamp. | None (Timestamp string). |
+| All Actions | `reasonCode` | **Operationally Necessary** | Allowlist | Strictly constrained to `ALLOWED_DELETION_REASON_CODES`. | None (Strict allowlist validation strips usernames and quotes). |
+| All Actions | `details` (metrics/errors) | **Operationally Necessary** | Runtime | Contains aggregate counts (`deletedPosts`, `prunedAuthors`) or sanitized failure categories (`failureCategory`, `errorCode`). | None (Raw exceptions and payload texts stripped). |
+
+#### 2. Detailed Retention Rationale for Durable Identifiers
+
+1. **Reddit Post Identifier (`DELETE_REDDIT_POST: targetId = postId`)**:
+   - **Operational Necessity**: Targeted post deletion is executed primarily in response to DMCA copyright infringement notices, defamation or privacy complaints, or regulatory takedowns. Proving compliance under statutory safe harbors (such as DMCA 17 U.S.C. § 512(c)) requires maintaining evidence that the specific reported URL/post ID was acted upon. If `targetId` were replaced with a non-identifying random UUID, Leystic would have no evidentiary proof that post `postId` was deleted.
+   - **Linkage Risk Assessment**: A Reddit post ID is a public base36 alphanumeric identifier (e.g. `14r9f2a`). It does not contain personal names, email addresses, or IP addresses. The only linkage risk is external: querying the ID against public web archives (e.g. Internet Archive Wayback Machine). Because Leystic's database redaction strips the stored copy of the post, retaining only the identifier in an access-restricted audit ledger balances statutory compliance obligations against privacy minimization.
+   - **Conclusion**: Retaining `postId` indefinitely in the append-only audit log is **operationally and legally necessary**.
+
+2. **X Snowflake Tweet Identifier (`DELETE_X_POST: targetId = tweetId`)**:
+   - **Operational Necessity**: Under the X Developer Agreement and Policy, developers must honor compliance messages (user deletions, tweet deletions) within strict SLAs and demonstrate verifiable adherence upon audit. A tweet ID is a synthetic 64-bit integer snowflake. Retaining `tweetId` is essential to prove to X Corp compliance reviewers and courts that specific tweets were purged.
+   - **Linkage Risk Assessment**: If queried against X API or external archives, a snowflake ID could link to the public tweet if not deleted upstream. However, Leystic stores no tweet content or author facts in the audit log.
+   - **Conclusion**: Retaining `tweetId` indefinitely in the append-only audit log is **operationally and contractually necessary**.
+
+3. **Customer Project and Account Identifiers (`DELETE_PROJECT: targetId = projectId`, `details.projectOwnerId`, and customer `actor = userId`)**:
+   - **Operational Necessity**: Under SOC 2 Type II, ISO 27001, and commercial enterprise agreements, organizations must maintain an immutable audit trail of data destruction events. When a workspace is deleted:
+     - `targetId = projectId`: Identifies which customer project was destroyed.
+     - `actor = userId`: Provides non-repudiation, demonstrating whether the project owner initiated the deletion (`USER_REQUEST`) or whether an operator intervened (`OPERATOR_DELETION`).
+     - `details.projectOwnerId`: Preserves tenancy attribution during administrative operator deletions where `actor` is the operator.
+     - If a customer disputes a project deletion or raises a security incident ("Who deleted our workspace?"), these identifiers provide the definitive audit answer.
+   - **Linkage Risk Assessment**: `projectId` is a random UUID with zero external meaning. `userId` and `projectOwnerId` are internal pseudonymous customer account IDs (e.g. `user_2...`). They do not contain email addresses, plaintext names, or credentials.
+   - **Conclusion**: Retaining `projectId`, `userId`, and `projectOwnerId` indefinitely in the append-only audit log is **operationally and contractually necessary**.
+
+#### 3. Contrast with Author Erasure (Right-to-be-Forgotten)
+- The audit ledger strictly differentiates between **asset/post identifiers** and **third-party author identities**:
+  - Author handles (`reddit_authors.username`, `x_authors.username`) belong to external natural persons who did not sign up for Leystic.
+  - When an author requests erasure or when an operator executes Right-to-be-Forgotten erasure, storing `username` in an immutable audit ledger would perpetuate the personal data indefinitely.
+  - Therefore, `ERASE_REDDIT_AUTHOR` and `ERASE_X_AUTHOR` replace `targetId` with an opaque, randomly generated reference (`anon-author-<uuid>`), and completely exclude usernames from `details` and `reasonCode`.
+- Post IDs, tweet IDs, and project IDs, by contrast, identify discrete content units or customer tenancy containers required for statutory and contractual proof of compliance.
+
+#### 4. Historical Remediation and Immutability Governance
+- **Immutability Invariant**: The `deletion_audit_log` is protected by database-level triggers rejecting `UPDATE`, `DELETE`, and `TRUNCATE`, with permissions revoked from `PUBLIC`.
+- **Historical Sanitization**: Migration `0047_immutable_deletion_audit.sql` previously sanitized pre-existing author erasure records (converting raw usernames to `anon-author-<hash>` and stripping author handles from `details`) prior to trigger lock-in.
+- **Future Governance**: Application code must never contain trigger bypasses or mutation backdoors. If future regulatory changes necessitate historical schema alterations, they must be executed exclusively through signed, auditable database administrator migrations that record a corresponding remediation entry in the audit ledger.
+
 ## 5. Shippable Capabilities Today (Without Blocked Sources)
 
 The following production features are fully operational, tested, and commercially clear to ship today:

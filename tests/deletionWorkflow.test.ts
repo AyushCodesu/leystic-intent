@@ -1216,4 +1216,154 @@ describeDb("targeted deletion and author erasure workflows", () => {
     expect(auditStr).not.toContain(sensitiveTweet);
     expect(auditStr).not.toContain("PostgreSQL fatal error");
   });
+
+  it("validates classification, investigability, and non-PII privacy boundaries of durable identifiers in deletion_audit_log", async () => {
+    const { db } = await import("@/db");
+    const schema = await import("@/db/schema");
+    const { deleteRedditPost, eraseRedditAuthor } = await import("@/lib/retention");
+    const { deleteXPost, eraseXAuthor } = await import("@/lib/x/retention");
+    const { deleteProject } = await import("@/lib/projects");
+    const { and, desc, eq } = await import("drizzle-orm");
+
+    const adminContext = {
+      operatorId: "op_audit_auditor",
+      role: "system_administrator" as const,
+      secretToken: "secret_token_at_least_32_chars_long_12345",
+    };
+
+    // 1. DELETE_REDDIT_POST: targetId = postId (operationally necessary for statutory DMCA/court proof)
+    const postId = `post_${randomUUID().slice(0, 8)}`;
+    const postAuthor = `author_${randomUUID().slice(0, 8)}`;
+    await db().insert(schema.redditPosts).values({
+      id: postId,
+      title: "Title that must not leak into audit",
+      body: "Body that must not leak into audit",
+      author: postAuthor,
+      subreddit: "saas",
+      url: `https://reddit.com/r/saas/comments/${postId}`,
+      createdAt: new Date(),
+    });
+
+    await deleteRedditPost(postId, { operatorContext: adminContext });
+
+    const [auditPost] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "DELETE_REDDIT_POST"), eq(schema.deletionAuditLog.targetId, postId)))
+      .limit(1);
+
+    expect(auditPost).toBeDefined();
+    expect(auditPost.targetId).toBe(postId); // Preserved for DMCA/court evidentiary proof
+    expect(auditPost.actor).toBe(adminContext.operatorId);
+    expect(auditPost.actorRole).toBe("system_administrator");
+    expect(typeof (auditPost.details as Record<string, unknown>).authorPruned).toBe("boolean");
+    // Verify zero author handles, titles, or body text leaked into the audit record
+    const postAuditJson = JSON.stringify(auditPost);
+    expect(postAuditJson).not.toContain(postAuthor);
+    expect(postAuditJson).not.toContain("Title that must not leak");
+    expect(postAuditJson).not.toContain("Body that must not leak");
+
+    // 2. DELETE_X_POST: targetId = tweetId (operationally necessary for X developer compliance proof)
+    const tweetId = `189${Math.floor(Math.random() * 100000000000000)}`;
+    const xAuthor = `xhandle_${randomUUID().slice(0, 6)}`;
+    await db().insert(schema.xPosts).values({
+      id: tweetId,
+      text: "Confidential tweet content that must not leak",
+      authorUsername: xAuthor,
+      createdAt: new Date(),
+    });
+
+    await deleteXPost(tweetId, { operatorContext: adminContext });
+
+    const [auditXPost] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "DELETE_X_POST"), eq(schema.deletionAuditLog.targetId, tweetId)))
+      .limit(1);
+
+    expect(auditXPost).toBeDefined();
+    expect(auditXPost.targetId).toBe(tweetId); // Preserved for platform compliance verification
+    const xPostAuditJson = JSON.stringify(auditXPost);
+    expect(xPostAuditJson).not.toContain(xAuthor);
+    expect(xPostAuditJson).not.toContain("Confidential tweet content");
+
+    // 3. DELETE_PROJECT: targetId = projectId, details.projectOwnerId, customer actor = userId
+    // Case A: Customer self-deletion
+    const customerUser = await makeUser();
+    const customerProject = await makeProject(customerUser.id, { name: "AuditCustomerProject" });
+    await deleteProject(customerUser.id, customerProject.id);
+
+    const [auditCustomerProject] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "DELETE_PROJECT"), eq(schema.deletionAuditLog.targetId, customerProject.id)))
+      .limit(1);
+
+    expect(auditCustomerProject).toBeDefined();
+    expect(auditCustomerProject.targetId).toBe(customerProject.id); // Internal UUID
+    expect(auditCustomerProject.actor).toBe(customerUser.id); // Non-repudiation
+    expect(auditCustomerProject.actorRole).toBe("project_owner");
+    expect(auditCustomerProject.reasonCode).toBe("USER_REQUEST");
+    expect((auditCustomerProject.details as Record<string, unknown>).isOperator).toBe(false);
+    expect((auditCustomerProject.details as Record<string, unknown>).projectOwnerId).toBe(customerUser.id);
+
+    // Case B: Operator administrative deletion
+    const operatorProject = await makeProject(customerUser.id, { name: "AuditOperatorProject" });
+    await deleteProject(customerUser.id, operatorProject.id, { operatorContext: adminContext });
+
+    const [auditOperatorProject] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "DELETE_PROJECT"), eq(schema.deletionAuditLog.targetId, operatorProject.id)))
+      .limit(1);
+
+    expect(auditOperatorProject).toBeDefined();
+    expect(auditOperatorProject.targetId).toBe(operatorProject.id);
+    expect(auditOperatorProject.actor).toBe(adminContext.operatorId); // Operator identity
+    expect(auditOperatorProject.actorRole).toBe("system_administrator");
+    expect(auditOperatorProject.reasonCode).toBe("OPERATOR_DELETION");
+    expect((auditOperatorProject.details as Record<string, unknown>).isOperator).toBe(true);
+    expect((auditOperatorProject.details as Record<string, unknown>).projectOwnerId).toBe(customerUser.id); // Tenancy attribution
+
+    // 4. Contrast: ERASE_REDDIT_AUTHOR and ERASE_X_AUTHOR must NEVER retain author handles as targetId
+    const targetRedditUser = `target_u_${randomUUID().slice(0, 6)}`;
+    await db().insert(schema.redditAuthors).values({
+      username: targetRedditUser,
+      karma: 100,
+    });
+    await eraseRedditAuthor(targetRedditUser, { operatorContext: adminContext });
+
+    const [auditRedditAuthor] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "ERASE_REDDIT_AUTHOR"), eq(schema.deletionAuditLog.actor, adminContext.operatorId)))
+      .orderBy(desc(schema.deletionAuditLog.createdAt))
+      .limit(1);
+
+    expect(auditRedditAuthor).toBeDefined();
+    expect(auditRedditAuthor.targetId).toMatch(/^anon-author-[0-9a-f-]{36}$/); // Opaque random UUID
+    expect(auditRedditAuthor.targetId).not.toContain(targetRedditUser);
+    expect(JSON.stringify(auditRedditAuthor)).not.toContain(targetRedditUser);
+
+    const targetXUser = `target_x_${randomUUID().slice(0, 6)}`;
+    await db().insert(schema.xAuthors).values({
+      username: targetXUser,
+      followers: 200,
+    });
+    await eraseXAuthor(targetXUser, { operatorContext: adminContext });
+
+    const [auditXAuthor] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "ERASE_X_AUTHOR"), eq(schema.deletionAuditLog.actor, adminContext.operatorId)))
+      .orderBy(desc(schema.deletionAuditLog.createdAt))
+      .limit(1);
+
+    expect(auditXAuthor).toBeDefined();
+    expect(auditXAuthor.targetId).toMatch(/^anon-author-[0-9a-f-]{36}$/);
+    expect(auditXAuthor.targetId).not.toContain(targetXUser);
+    expect(JSON.stringify(auditXAuthor)).not.toContain(targetXUser);
+
+    await db().delete(schema.users).where(eq(schema.users.id, customerUser.id));
+  });
 });
