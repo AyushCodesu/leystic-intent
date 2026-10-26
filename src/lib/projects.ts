@@ -2,7 +2,7 @@ import { cache } from "react";
 import { and, asc, eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { db } from "@/db";
-import { projects, users } from "@/db/schema";
+import { deletionAuditLog, projects, users } from "@/db/schema";
 import { forgetProjectFeed } from "./projectFeedCache";
 import { assertAuthorizedOperator, ensureSourcePolicyFresh, type OperatorContext } from "./sourcePolicy";
 import { limitsFor } from "./tiers";
@@ -86,13 +86,17 @@ return project;
 export async function deleteProject(
   userId: string,
   projectId: string,
-  options: { operatorContext?: OperatorContext } = {},
+  options: { operatorContext?: OperatorContext; reason?: string } = {},
 ): Promise<{ deleted: boolean; notFound?: boolean; projectId: string }> {
   let isOperator = false;
+  let actor = userId;
+  let actorRole = "project_owner";
   if (options.operatorContext) {
     await ensureSourcePolicyFresh();
-    assertAuthorizedOperator(options.operatorContext);
+    const verified = assertAuthorizedOperator(options.operatorContext);
     isOperator = true;
+    actor = verified.operatorId;
+    actorRole = verified.role;
   }
 
   return db().transaction(async (tx) => {
@@ -112,6 +116,20 @@ export async function deleteProject(
 
     // Cascade deletion of all project-scoped tables in PostgreSQL
     await tx.delete(projects).where(eq(projects.id, projectId));
+
+    await tx.insert(deletionAuditLog).values({
+      action: "DELETE_PROJECT",
+      actor,
+      actorRole,
+      targetType: "project",
+      targetId: projectId,
+      outcome: "SUCCESS",
+      reasonCode: options.reason ?? (isOperator ? "OPERATOR_DELETION" : "USER_REQUEST"),
+      details: {
+        isOperator,
+        projectOwnerId: existing[0].userId,
+      },
+    });
 
     forgetProjectFeed(projectId);
 

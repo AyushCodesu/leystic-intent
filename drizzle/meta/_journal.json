@@ -323,6 +323,13 @@
       "when": 1790896900000,
       "tag": "0045_operator_bootstrap_state",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1790897000000,
+      "tag": "0046_deletion_audit_log",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,7 @@
-import { and, count, eq, exists, inArray, isNotNull, lt, notExists, sql } from "drizzle-orm";
+import { and, count, eq, exists, gte, inArray, isNotNull, isNull, lt, notExists, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
+  deletionAuditLog,
   leadEvaluations,
   leads,
   postReadings,
@@ -46,6 +47,12 @@ export type RetentionOptions = {
 };
 
 /**
+ * Neutral placeholders replacing provider content and author identities upon expiry or erasure.
+ */
+export const REDACTED_TITLE = "[Redacted / Expired]";
+export const REDACTED_AUTHOR = "[deleted]";
+
+/**
  * Redacts raw provider content from expired posts and comments, and clears
  * verbatim excerpts from downstream tables (leads, lead_evaluations, competitor_mentions, post_readings).
  *
@@ -62,7 +69,12 @@ export async function redactExpiredProviderContent(
 
   const expiredPostFilter = and(
     lt(redditPosts.createdAt, cutoff),
-    sql`(${redditPosts.body} is not null or ${redditPosts.raw} is not null)`,
+    sql`(${redditPosts.body} is not null or ${redditPosts.raw} is not null or ${redditPosts.imageUrl} is not null or ${redditPosts.title} <> ${REDACTED_TITLE} or (${redditPosts.author} is not null and ${redditPosts.author} <> ${REDACTED_AUTHOR}))`,
+  );
+
+  const expiredCommentFilter = and(
+    lt(redditComments.createdAt, cutoff),
+    sql`(${redditComments.body} is not null or ${redditComments.raw} is not null or (${redditComments.author} is not null and ${redditComments.author} <> ${REDACTED_AUTHOR}))`,
   );
 
   if (options.dryRun) {
@@ -73,19 +85,14 @@ export async function redactExpiredProviderContent(
     const commentCountRow = await db()
       .select({ total: count() })
       .from(redditComments)
-      .where(
-        and(
-          lt(redditComments.createdAt, cutoff),
-          sql`(${redditComments.body} is not null or ${redditComments.raw} is not null)`,
-        ),
-      );
+      .where(expiredCommentFilter);
     return {
       redactedPosts: Number(postCountRow[0]?.total ?? 0),
       redactedComments: Number(commentCountRow[0]?.total ?? 0),
     };
   }
 
-  // 1. Scrub raw body and raw payload from expired posts
+  // 1. Scrub raw body, raw payload, title, image, and author from expired posts
   const redactedPosts = await deleteInBatches(async () => {
     const targets = await db()
       .select({ id: redditPosts.id })
@@ -97,30 +104,35 @@ export async function redactExpiredProviderContent(
 
     await db()
       .update(redditPosts)
-      .set({ body: null, raw: null })
+      .set({
+        title: REDACTED_TITLE,
+        body: null,
+        raw: null,
+        imageUrl: null,
+        author: REDACTED_AUTHOR,
+      })
       .where(inArray(redditPosts.id, targets.map((t) => t.id)));
 
     return targets.length;
   }, batch);
 
-  // 2. Scrub raw body and raw payload from expired comments
+  // 2. Scrub raw body, raw payload, and author from expired comments
   const redactedComments = await deleteInBatches(async () => {
     const targets = await db()
       .select({ id: redditComments.id })
       .from(redditComments)
-      .where(
-        and(
-          lt(redditComments.createdAt, cutoff),
-          sql`(${redditComments.body} is not null or ${redditComments.raw} is not null)`,
-        ),
-      )
+      .where(expiredCommentFilter)
       .limit(batch);
 
     if (targets.length === 0) return 0;
 
     await db()
       .update(redditComments)
-      .set({ body: null, raw: null })
+      .set({
+        body: null,
+        raw: null,
+        author: REDACTED_AUTHOR,
+      })
       .where(inArray(redditComments.id, targets.map((t) => t.id)));
 
     return targets.length;
@@ -132,28 +144,56 @@ export async function redactExpiredProviderContent(
     .from(redditPosts)
     .where(lt(redditPosts.createdAt, cutoff));
 
+  const expiredCommentIdsSubquery = db()
+    .select({ id: redditComments.id })
+    .from(redditComments)
+    .where(lt(redditComments.createdAt, cutoff));
+
+  // Scrub post-level leads
   await db()
     .update(leads)
     .set({ matchedPhrase: null })
-    .where(and(isNotNull(leads.matchedPhrase), inArray(leads.postId, expiredPostIdsSubquery)));
+    .where(and(isNotNull(leads.matchedPhrase), isNull(leads.commentId), inArray(leads.postId, expiredPostIdsSubquery)));
 
+  // Scrub comment-level leads
+  await db()
+    .update(leads)
+    .set({ matchedPhrase: null })
+    .where(and(isNotNull(leads.matchedPhrase), isNotNull(leads.commentId), inArray(leads.commentId, expiredCommentIdsSubquery)));
+
+  // Scrub post-level evaluations
   await db()
     .update(leadEvaluations)
     .set({ evidenceQuote: null })
     .where(
-      and(isNotNull(leadEvaluations.evidenceQuote), inArray(leadEvaluations.postId, expiredPostIdsSubquery)),
+      and(isNotNull(leadEvaluations.evidenceQuote), isNull(leadEvaluations.commentId), inArray(leadEvaluations.postId, expiredPostIdsSubquery)),
     );
 
+  // Scrub comment-level evaluations
+  await db()
+    .update(leadEvaluations)
+    .set({ evidenceQuote: null })
+    .where(
+      and(isNotNull(leadEvaluations.evidenceQuote), isNotNull(leadEvaluations.commentId), inArray(leadEvaluations.commentId, expiredCommentIdsSubquery)),
+    );
+
+  // Scrub competitor mentions (quotes and derived summaries/explanations)
   await db()
     .update(competitorMentions)
-    .set({ quote: null, switchingEvidence: null })
+    .set({
+      quote: null,
+      switchingEvidence: null,
+      summary: null,
+      explanation: null,
+    })
     .where(
       and(
-        sql`(${competitorMentions.quote} is not null or ${competitorMentions.switchingEvidence} is not null)`,
+        sql`(${competitorMentions.quote} is not null or ${competitorMentions.switchingEvidence} is not null or ${competitorMentions.summary} is not null or ${competitorMentions.explanation} is not null)`,
         inArray(competitorMentions.postId, expiredPostIdsSubquery),
       ),
     );
 
+  // Scrub post readings
   await db()
     .update(postReadings)
     .set({ quote: null })
@@ -256,6 +296,17 @@ export async function deleteExpiredPosts(
         .from(competitorMentions)
         .where(eq(competitorMentions.postId, redditPosts.id)),
     ),
+    notExists(
+      db()
+        .select({ one: sql`1` })
+        .from(redditComments)
+        .where(
+          and(
+            eq(redditComments.postId, redditPosts.id),
+            gte(redditComments.createdAt, cutoff),
+          ),
+        ),
+    ),
   );
 
   if (options.dryRun) {
@@ -267,7 +318,7 @@ export async function deleteExpiredPosts(
   }
 
   // 1. Redact raw provider content from expired referenced posts and downstream tables
-  await redactExpiredProviderContent(now, batch, options);
+  const redactionCounts = await redactExpiredProviderContent(now, batch, options);
 
   // 2. Delete unreferenced expired posts in bounded batches
   const expired = db()
@@ -285,7 +336,32 @@ export async function deleteExpiredPosts(
   }, batch);
 
   // 3. Prune orphaned author profiles
-  await pruneOrphanedAuthors(now, batch, options);
+  const prunedAuthors = await pruneOrphanedAuthors(now, batch, options);
+
+  // 4. Record routine TTL batch in append-only deletion audit log
+  if (
+    !options.dryRun &&
+    (deletedTotal > 0 ||
+      redactionCounts.redactedPosts > 0 ||
+      redactionCounts.redactedComments > 0 ||
+      prunedAuthors > 0)
+  ) {
+    await db().insert(deletionAuditLog).values({
+      action: "TTL_BATCH_CLEANUP",
+      actor: "system:routine_ttl",
+      actorRole: "system_service",
+      targetType: "retention_batch",
+      targetId: now.toISOString(),
+      outcome: "SUCCESS",
+      reasonCode: "ROUTINE_TTL_EXPIRY",
+      details: {
+        deletedPosts: deletedTotal,
+        redactedPosts: redactionCounts.redactedPosts,
+        redactedComments: redactionCounts.redactedComments,
+        prunedAuthors,
+      },
+    });
+  }
 
   return deletedTotal;
 }
@@ -299,12 +375,13 @@ export async function deleteExpiredPosts(
  */
 export async function deleteRedditPost(
   postId: string,
-  options: { operatorContext?: OperatorContext; dryRun?: boolean } = {},
+  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: string },
 ): Promise<{ deleted: boolean; notFound?: boolean; dryRun?: boolean; postId: string }> {
-  if (options.operatorContext) {
-    await ensureSourcePolicyFresh();
-    assertAuthorizedOperator(options.operatorContext);
+  if (!options?.operatorContext) {
+    throw new OperatorApprovalRequiredError("delete_reddit_post");
   }
+  await ensureSourcePolicyFresh();
+  const verified = assertAuthorizedOperator(options.operatorContext);
 
   const existing = await db()
     .select({ id: redditPosts.id, author: redditPosts.author })
@@ -322,8 +399,9 @@ export async function deleteRedditPost(
   return db().transaction(async (tx) => {
     await tx.delete(redditPosts).where(eq(redditPosts.id, postId));
 
+    let authorPruned = false;
     const postAuthor = existing[0].author;
-    if (postAuthor) {
+    if (postAuthor && postAuthor !== REDACTED_AUTHOR) {
       const remainingPosts = await tx
         .select({ id: redditPosts.id })
         .from(redditPosts)
@@ -339,8 +417,23 @@ export async function deleteRedditPost(
         await tx
           .delete(redditAuthors)
           .where(eq(sql`lower(${redditAuthors.username})`, postAuthor.toLowerCase()));
+        authorPruned = true;
       }
     }
+
+    // Persist append-only audit event in the same transaction
+    await tx.insert(deletionAuditLog).values({
+      action: "DELETE_REDDIT_POST",
+      actor: verified.operatorId,
+      actorRole: verified.role,
+      targetType: "reddit_post",
+      targetId: postId,
+      outcome: "SUCCESS",
+      reasonCode: options.reason ?? "OPERATOR_DELETION",
+      details: {
+        authorPruned,
+      },
+    });
 
     return { deleted: true, postId };
   });
@@ -354,12 +447,13 @@ export async function deleteRedditPost(
  */
 export async function eraseRedditAuthor(
   username: string,
-  options: { operatorContext?: OperatorContext; dryRun?: boolean } = {},
+  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: string },
 ): Promise<{ erased: boolean; notFound?: boolean; dryRun?: boolean; username: string }> {
-  if (options.operatorContext) {
-    await ensureSourcePolicyFresh();
-    assertAuthorizedOperator(options.operatorContext);
+  if (!options?.operatorContext) {
+    throw new OperatorApprovalRequiredError("erase_reddit_author");
   }
+  await ensureSourcePolicyFresh();
+  const verified = assertAuthorizedOperator(options.operatorContext);
 
   const existing = await db()
     .select({ username: redditAuthors.username })
@@ -387,17 +481,33 @@ export async function eraseRedditAuthor(
   return db().transaction(async (tx) => {
     await tx
       .update(redditPosts)
-      .set({ author: "[deleted]" })
+      .set({ author: REDACTED_AUTHOR })
       .where(eq(sql`lower(${redditPosts.author})`, username.toLowerCase()));
 
     await tx
       .update(redditComments)
-      .set({ author: "[deleted]" })
+      .set({ author: REDACTED_AUTHOR })
       .where(eq(sql`lower(${redditComments.author})`, username.toLowerCase()));
 
     await tx
       .delete(redditAuthors)
       .where(eq(sql`lower(${redditAuthors.username})`, username.toLowerCase()));
+
+    // Persist append-only audit event in the same transaction
+    await tx.insert(deletionAuditLog).values({
+      action: "ERASE_REDDIT_AUTHOR",
+      actor: verified.operatorId,
+      actorRole: verified.role,
+      targetType: "reddit_author",
+      targetId: username.toLowerCase(),
+      outcome: "SUCCESS",
+      reasonCode: options.reason ?? "AUTHOR_ERASURE_REQUEST",
+      details: {
+        postsAnonymized: matchingPosts.length,
+        commentsAnonymized: matchingComments.length,
+        profileDeleted: existing.length > 0,
+      },
+    });
 
     return { erased: true, username };
   });

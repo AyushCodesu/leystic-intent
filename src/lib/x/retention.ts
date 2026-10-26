@@ -1,8 +1,8 @@
 import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { xAuthors, xLanes, xPosts, xRuns } from "@/db/schema";
+import { deletionAuditLog, xAuthors, xLanes, xPosts, xRuns } from "@/db/schema";
 import { assertAuthorizedOperator, ensureSourcePolicyFresh, type OperatorContext } from "@/lib/sourcePolicy";
-import { deleteInBatches, RETENTION_BATCH } from "@/lib/retention";
+import { deleteInBatches, OperatorApprovalRequiredError, RETENTION_BATCH } from "@/lib/retention";
 import { daysAgo } from "@/lib/time";
 import { RETENTION_DAYS } from "@/lib/tiers";
 
@@ -51,12 +51,13 @@ export async function deleteExpiredXData(now = new Date()): Promise<{ posts: num
  */
 export async function deleteXPost(
   tweetId: string,
-  options: { operatorContext?: OperatorContext; dryRun?: boolean } = {},
+  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: string },
 ): Promise<{ deleted: boolean; notFound?: boolean; dryRun?: boolean; tweetId: string }> {
-  if (options.operatorContext) {
-    await ensureSourcePolicyFresh();
-    assertAuthorizedOperator(options.operatorContext);
+  if (!options?.operatorContext) {
+    throw new OperatorApprovalRequiredError("delete_x_post");
   }
+  await ensureSourcePolicyFresh();
+  const verified = assertAuthorizedOperator(options.operatorContext);
 
   const existing = await db()
     .select({ id: xPosts.id })
@@ -74,6 +75,17 @@ export async function deleteXPost(
   return db().transaction(async (tx) => {
     await tx.delete(xPosts).where(eq(xPosts.id, tweetId));
 
+    await tx.insert(deletionAuditLog).values({
+      action: "DELETE_X_POST",
+      actor: verified.operatorId,
+      actorRole: verified.role,
+      targetType: "x_post",
+      targetId: tweetId,
+      outcome: "SUCCESS",
+      reasonCode: options.reason ?? "OPERATOR_DELETION",
+      details: {},
+    });
+
     return { deleted: true, tweetId };
   });
 }
@@ -84,12 +96,13 @@ export async function deleteXPost(
  */
 export async function eraseXAuthor(
   username: string,
-  options: { operatorContext?: OperatorContext; dryRun?: boolean } = {},
+  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: string },
 ): Promise<{ erased: boolean; notFound?: boolean; dryRun?: boolean; username: string }> {
-  if (options.operatorContext) {
-    await ensureSourcePolicyFresh();
-    assertAuthorizedOperator(options.operatorContext);
+  if (!options?.operatorContext) {
+    throw new OperatorApprovalRequiredError("erase_x_author");
   }
+  await ensureSourcePolicyFresh();
+  const verified = assertAuthorizedOperator(options.operatorContext);
 
   const existing = await db()
     .select({ username: xAuthors.username })
@@ -106,6 +119,17 @@ export async function eraseXAuthor(
 
   return db().transaction(async (tx) => {
     await tx.delete(xAuthors).where(eq(sql`lower(${xAuthors.username})`, username.toLowerCase()));
+
+    await tx.insert(deletionAuditLog).values({
+      action: "ERASE_X_AUTHOR",
+      actor: verified.operatorId,
+      actorRole: verified.role,
+      targetType: "x_author",
+      targetId: username.toLowerCase(),
+      outcome: "SUCCESS",
+      reasonCode: options.reason ?? "AUTHOR_ERASURE_REQUEST",
+      details: {},
+    });
 
     return { erased: true, username };
   });

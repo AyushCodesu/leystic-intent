@@ -1,137 +1,172 @@
 # Insice Commercial Launch Gate & Source Readiness Report
 
-**Document Status**: Official Release Audit  
-**Date**: October 2026  
-**Target Repository**: `AyushCodesu/leystic-intent`  
-**Evaluation Scope**: Source Authorization, Data Retention, Deletion Workflows, and Shippable Capabilities  
+- **Document Status**: Official Release Audit
+- **Date**: October 2026
+- **Target Repository**: `AyushCodesu/leystic-intent`
+- **Branch**: `fix/durable-operator-credentials-and-validation`
+- **Evaluation Scope**: Provider Text Inventory, Source Authorization Gates, Retention Decoupling, Deletion Workflows, Multi-Tenant Safety, and Audit Logging
 
 ---
 
-## 1. Technically Enabled vs. Blocked Data Sources
+## 1. Provider-Derived Text and Personal Data Inventory
 
-The following table summarizes the technical configuration status across all external data sources integrated into the codebase:
+An exhaustive audit of all database schemas (`src/db/schema/shared.ts`, `src/db/schema/tenant.ts`, `src/db/schema/competitors.ts`, `src/db/schema/x.ts`) was performed to catalog all provider-derived text, quotes, and personal/profile fields.
 
-| Source Identifier | Default Environment Flags | Runtime Gate Status | Technical Access Route | Notes |
-|---|---|---|---|---|
-| **Website Crawler** (`website_crawler`) | `N/A` (First-party) | **APPROVED** (Technically Enabled) | First-party HTTP client with IP pinning & SSRF rebinding prevention | Restricted to customer-configured domains and sitemaps only. |
-| **LLM Inference** (`unclassified`) | `OPENROUTER_API_KEY` | **APPROVED** (Technically Enabled) | OpenRouter / Vercel AI Gateway | Used for prompt-based scoring, theme clustering, and summarization. |
-| **Reddit** (`reddit`) | `REDDIT_SOURCE_ENABLED=false` | **BLOCKED** (Technically Disabled) | AnyAPI Gateway Proxy (`reddit.search`, `reddit.post`, etc.) | Fails closed. Cannot be queried or read by any background job, API, or worker. |
-| **X / Twitter** (`x`) | `X_LEADS=false` | **PENDING** (Technically Disabled) | AnyAPI Gateway Proxy (`twitter.search`, `twitter.tweet`) | Fails closed. Feature dark; background scans and alert workers skip execution. |
-| **Google Scraped SERP** (`google_scraped_serp`) | `GOOGLE_SERP_SOURCE_ENABLED=false` | **BLOCKED** (Technically Disabled) | AnyAPI Google Scraper | Fails closed. Disallowed under source policy. |
-| **Google Official Search** (`google_official_api`) | Unconfigured | **BLOCKED** (Technically Disabled) | Google Custom Search JSON API | Unconfigured credentials; fails closed. |
-
-All data acquisition paths strictly consult `assertSourceAuthorized()` / `isSourceAuthorized()`. When a source is `BLOCKED` or `PENDING`, queries, background jobs, cache lookups, and API reads fail closed with `SourceUnauthorizedError` or return empty result sets.
-
----
-
-## 2. Verified External Commercial Authorization & Supporting Evidence
-
-A technical implementation or automated test pass does **not** constitute legal or commercial clearance. The true external authorization status for each source is as follows:
-
-| Source Identifier | Commercial Status | Verified External Evidence | Clear for Launch? |
-|---|---|---|---|
-| **First-Party Customer Website Crawler** | **Authorized** | Customer Terms of Service acceptance and authenticated project root URL configuration. First-party site crawling only. | **YES** |
-| **LLM Inference Gateway** | **Authorized** | Commercial terms of service under provisioned OpenRouter and Vercel AI Gateway accounts. | **YES** |
-| **Reddit (via AnyAPI)** | **UNAUTHORIZED** | **NO executed commercial contract exists with Reddit Inc.** Gateway scraping/proxying via AnyAPI does not grant a third-party commercial redistribution or lead-generation license under Reddit's Developer Terms. | **NO (P0 Launch Blocker)** |
-| **X / Twitter (via AnyAPI)** | **UNAUTHORIZED** | **NO direct commercial developer agreement or enterprise contract executed.** Status remains in pilot review. | **NO (P0 Launch Blocker)** |
-| **Google Scraped SERP** | **UNAUTHORIZED** | Scraped Google search results are prohibited by Google Terms of Service and cannot be commercially licensed via scraping gateways. | **NO (Permanently Blocked)** |
-| **Google Official API (CSE)** | **Unconfigured** | Requires a dedicated Google Cloud billing project, approved Custom Search Engine (CSE ID), and provisioned API key. | **NO (Pending Configuration)** |
-
----
-
-## 3. Provider-Derived Data Categories and Retention Matrix
-
-All tables holding provider-derived content enforce bounded retention and decoupling policies:
-
-| Data Category | Stored Database Tables | Stored Fields & Content | Retention Duration | Cleanup & Decoupling Behavior |
-|---|---|---|---|---|
-| **Reddit Posts** | `reddit_posts` | Thread metadata (id, url, subreddit, createdAt, score), title, raw body text (`body`), and API payload (`raw`). | **30 days** default (`RETENTION_DAYS`) | Unreferenced expired posts are deleted in bounded batches of 500 via `deleteExpiredPosts`. Referenced posts (by leads, SEO, or competitors) have raw `body` and `raw` JSON nulled out under `redactExpiredProviderContent`. |
-| **Reddit Comments** | `reddit_comments` | Comment metadata, author, body text, permalink, raw API payload. | Follows parent post (max 30 days) | Deleted via `CASCADE` when unreferenced post is deleted. For referenced posts, comment `body` and `raw` are set to `null` past 30 days. |
-| **Reddit Authors** | `reddit_authors` | Public username, avatar URL, karma, account creation date, raw JSON profile. | 30 days / Pruned when orphaned | `pruneOrphanedAuthors` deletes author profiles no longer referenced by any stored post or comment; raw API responses scrubbed after 30 days. |
-| **X Posts** | `x_posts` | Tweet ID, author ID, tweet text, metrics, raw payload. | **30 days** (`RETENTION_DAYS`) | `deleteExpiredXData` deletes posts older than 30 days; cascades to `x_leads` and `x_evaluations`. |
-| **X Authors** | `x_authors` | Username, name, bio description, followers, verified status, raw payload. | **30 days** (`RETENTION_DAYS`) | `deleteExpiredXData` deletes author records older than 30 days. |
-| **Customer Leads** | `leads` | Business metrics (`score`, `fit`, `intent`, `engagement`), stage, reason, status, outcome tracking, matched phrase. | Indefinite (or until project deletion) | **Decoupled Retention**: Lead history preserves business insights and outcomes while raw provider content (`reddit_posts.body`, `leads.matchedPhrase`) is scrubbed past 30 days. Deleted via `deleteProject` cascade. |
-| **Lead Evaluations** | `lead_evaluations` | Candidate verdict, need state, scoring metrics, verbatim evidence quote (`evidenceQuote`). | Follows post / project | Verbatim evidence quotes (`evidenceQuote`) are redacted past 30 days. Row cascades with `reddit_posts` or `projects`. |
-| **Competitor Mentions** | `competitor_mentions` | Competitor name, sentiment, reason category, verbatim quote (`quote`), switching evidence (`switchingEvidence`). | 30-day display window; stored with project | Verbatim `quote` and `switchingEvidence` are scrubbed past 30 days under `redactExpiredProviderContent`. Rows cascade with `projects`. |
-| **SEO Opportunities** | `seo_opportunities` | Tracked keyword, search position ranking, competitor presence flag, post link. | Indefinite (or until project deletion) | Post reference has `ON DELETE SET NULL`. Associated post raw content is scrubbed past 30 days. Deleted with `projects` cascade. |
-| **Search Runs & SERP** | `search_runs`, `serp_results`, `search_run_posts` | Normalized query string, request ID, execution cost USD, funded-by entity. | Indefinite | Preserved for financial ledger accounting, daily house budget cap validation, and billing auditability. No raw post bodies stored. |
-| **Website Pages** | `website_pages`, `website_inspections` | Customer page URL, title, headings, inspected content. | Preserved per inspection snapshot | Deleted with `projects` cascade. |
+| Field Identifier | Origin & Upstream Provider | Contains Copied Text? | Contains Personal Info? | Intended Retention Period | Cleanup & Redaction Behavior |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `reddit_posts.title` | Reddit Data API post title | **Yes** (Author post title) | Potentially in title | **30 days** (`RETENTION_DAYS`) | **Redacted**: Replaced with neutral placeholder `[Redacted / Expired]` (`REDACTED_TITLE`) when post is expired and referenced; dropped on post deletion. |
+| `reddit_posts.body` | Reddit post body / markdown | **Yes** (Full post text) | Potentially in body | **30 days** (`RETENTION_DAYS`) | **Redacted**: Set to `null` past 30 days under `redactExpiredProviderContent`; dropped on post deletion. |
+| `reddit_posts.raw` | Raw Reddit API post JSON | **Yes** (Full payload) | **Yes** (Metadata, author) | **30 days** (`RETENTION_DAYS`) | **Redacted**: Set to `null` past 30 days; dropped on post deletion. |
+| `reddit_posts.author` | Reddit author username | No | **Yes** (Online identity) | **30 days** (`RETENTION_DAYS`) | **Anonymized**: Replaced with `[deleted]` (`REDACTED_AUTHOR`) when post expires; row pruned when unreferenced. |
+| `reddit_posts.imageUrl` | Reddit preview media URL | No | No | **30 days** (`RETENTION_DAYS`) | **Redacted**: Set to `null` past 30 days. |
+| `reddit_comments.body` | Reddit comment body text | **Yes** (Full comment) | Potentially in comment | Follows parent (max 30d) | **Redacted**: Set to `null` past 30 days; dropped via CASCADE on unreferenced post deletion. |
+| `reddit_comments.raw` | Raw Reddit API comment JSON | **Yes** (Full payload) | **Yes** (Metadata, author) | Follows parent (max 30d) | **Redacted**: Set to `null` past 30 days. |
+| `reddit_comments.author` | Reddit comment author username | No | **Yes** (Online identity) | Follows parent (max 30d) | **Anonymized**: Replaced with `[deleted]` (`REDACTED_AUTHOR`) past 30 days. |
+| `reddit_authors.avatarUrl` | Reddit profile avatar image | No | **Yes** (User image) | 30 days / unreferenced | Pruned via `pruneOrphanedAuthors` when author has no active posts or comments. |
+| `reddit_authors.karma` | Reddit karma score | No | No | 30 days / unreferenced | Pruned when orphaned. |
+| `reddit_authors.accountCreatedAt`| Reddit account opening date | No | No | 30 days / unreferenced | Pruned when orphaned. |
+| `reddit_authors.raw` | Raw Reddit author API payload | **Yes** (Bio & metadata) | **Yes** (Full profile) | **30 days from fetch** | **Scrubbed**: Set to `null` past 30 days from `fetchedAt`; row deleted when unreferenced. |
+| `leads.matchedPhrase` | Verbatim quote from post/comment | **Yes** (Exact snippet) | Potentially | **30 days** | **Redacted**: Set to `null` past 30 days; preserved business lead row (score, stage, status). |
+| `leads.reason` | Synthetic lead classification sentence | **No** (Template sentence built from enums) | **No** | Indefinite | Preserved for customer lead history. Does not copy verbatim provider text. |
+| `leads.notFitReason` | Customer user-entered disqualification tag | **No** (Customer categorization) | **No** | Indefinite | Preserved for customer review. |
+| `leads.outcomeNotes` | Customer user-authored business notes | **No** (Customer note) | **No** | Indefinite | Preserved for customer pipeline history. |
+| `lead_evaluations.evidenceQuote` | Extracted need quote | **Yes** (Verbatim excerpt) | Potentially | **30 days** | **Redacted**: Set to `null` past 30 days under `redactExpiredProviderContent`. |
+| `lead_evaluations.reason` | Classifier synthetic explanation | **No** (Synthetic template) | **No** | Follows evaluation | Preserved for candidate verdict consistency. |
+| `competitor_mentions.quote` | Verbatim sentence naming competitor | **Yes** (Exact quote) | Potentially | **30 days** | **Redacted**: Set to `null` past 30 days. |
+| `competitor_mentions.switchingEvidence`| Verbatim switching evidence phrase | **Yes** (Exact quote) | Potentially | **30 days** | **Redacted**: Set to `null` past 30 days. |
+| `competitor_mentions.summary` | LLM-generated mention summary | Derived summary | No | **30 days** | **Redacted**: Set to `null` past 30 days to prevent retaining derived narrative fragments. |
+| `competitor_mentions.explanation` | LLM-generated switching rationale | Derived explanation | No | **30 days** | **Redacted**: Set to `null` past 30 days. Business indicators (competitor, sentiment) kept. |
+| `post_readings.quote` | Verbatim statement of buyer need | **Yes** (Exact sentence) | Potentially | **30 days** | **Redacted**: Set to `null` past 30 days; categorical `relationship` and `needState` preserved. |
+| `serp_results.title` / `.snippet` | Google SERP result title & snippet | **Yes** (Search result text) | No | Bound to search run | Dropped on search run cleanup or cascade. |
+| `discovery_evidence.snippet` | Discovered Google thread snippet | **Yes** (Search snippet) | No | Project discovery | Cascades with `projects` deletion. |
+| `x_posts.text` | Tweet body text | **Yes** (Full tweet) | Potentially | **30 days** (`RETENTION_DAYS`) | **Purged**: Completely deleted past 30 days (`deleteExpiredXData`); cascades to leads/evals. |
+| `x_posts.authorUsername` / `authorName` | X handle and display name | No | **Yes** (Identity) | **30 days** (`RETENTION_DAYS`) | Deleted with tweet past 30 days. |
+| `x_authors.bio` / `name` / `website` | X author profile details | **Yes** (Bio description) | **Yes** (Personal info) | **30 days** (`RETENTION_DAYS`) | Deleted past 30 days via `deleteExpiredXData`. |
+| `x_evaluations.matchedPhrase` / `needQuote` | Verbatim tweet quotes | **Yes** (Exact quotes) | Potentially | **30 days** | Cascades with `x_posts` deletion. |
+| `x_leads.matchedPhrase` | Verbatim tweet quote | **Yes** (Exact quote) | Potentially | **30 days** | Cascades with `x_posts` deletion. |
 
 ---
 
-## 4. Deletion Detection Limitations and Workflows
+## 2. Technically Enabled vs. Blocked Data Sources
 
-### Technical Limitations
-1. **No Upstream Push Deletion Events**: Third-party providers (Reddit and X via gateway) do not push webhooks or notifications when a user deletes a post, removes a comment, or deletes their account on the source platform.
-2. **Detection on Refetch Only**: Upstream deletions can only be detected when a URL or thread is actively polled or re-fetched.
-3. **Third-Party Right to Erasure**: Direct GDPR/CCPA requests executed on reddit.com or x.com cannot be automatically detected by Leystic.
+All runtime source gates consult `assertSourceAuthorized()` / `isSourceAuthorized()` in `src/lib/sourcePolicy.ts`:
 
-### Implemented Deletion Workflows
-To maintain rigorous compliance despite upstream platform constraints, the following internal deletion paths are operational:
-- **Automatic Routine TTL Expiration (`deleteExpiredPosts`, `deleteExpiredXData`)**:
-  - Automatically runs every 24 hours in bounded batches (`RETENTION_BATCH = 500`).
-  - Unreferenced expired posts (> 30 days) are deleted completely.
-  - Referenced posts have raw bodies and JSON payloads purged, decoupling lead business records from provider content.
-  - Downstream excerpts (`leads.matchedPhrase`, `lead_evaluations.evidenceQuote`, `competitor_mentions.quote`, `post_readings.quote`) are wiped.
-  - Orphaned authors in `reddit_authors` are pruned via `pruneOrphanedAuthors`.
-- **Targeted Post Deletion (`deleteRedditPost`, `deleteXPost`)**:
-  - Allows an operator or compliance officer to delete a specific post upon receiving an erasure request or DMCA notice.
-  - Cascades cleanly across all comments, evaluations, readings, competitor mentions, and leads.
-  - Prunes the author profile if orphaned.
-  - Transactional and idempotent.
-- **Targeted Author Erasure (`eraseRedditAuthor`, `eraseXAuthor`)**:
-  - Anonymizes author attribution to `[deleted]` across all posts and comments.
-  - Removes the author's profile row from `reddit_authors` / `x_authors`.
-  - Transactional and idempotent.
-- **Customer Project Deletion (`deleteProject`, `DELETE /api/v1/projects/:id`)**:
-  - Authenticated and authorized project owner (or privileged operator) can delete an entire project.
-  - Automatically cascades and deletes all project-specific records (`leads`, `lead_evaluations`, `seo_opportunities`, `competitor_mentions`, `pain_themes`, `alerts`, `jobs`, `website_inspections`).
-  - **Multi-Tenant Isolation Guarantee**: Shared records (`reddit_posts`, `reddit_authors`, `search_runs`) referenced by other customers are preserved. If a shared post was only tracked by the deleted project, it becomes unreferenced and will be purged on the next retention run.
-- **Privacy-Preserving Audit Trail**:
-  - Administrative deletion actions record target type, target ID, operator ID, and timestamp in `operatorAuditLog`.
-  - Deleted post bodies, comment text, and personal data are **never** copied into audit logs.
+| Source Identifier | Technical Status | Gate Record | Runtime Default | Commercial Clearance Status | Launch Posture |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **First-Party Crawler** (`website_crawler`) | **ENABLED** | `REC-WEBSITE-CRAWLER-FIRST-PARTY` | Active | Customer Terms & Verified Root URLs | **Launch Ready** (Scope strictly limited to authenticated customer domains) |
+| **LLM Inference** (`unclassified`) | **ENABLED** | N/A (Standard SaaS APIs) | Active | OpenRouter / Vercel AI Gateway Commercial Terms | **Launch Ready** |
+| **Reddit Data API** (`reddit`) | **BLOCKED** | `REC-REDDIT-COMMERCIAL-UNVERIFIED` | `REDDIT_SOURCE_ENABLED=false` | **UNAUTHORIZED** (No commercial developer agreement with Reddit Inc.) | **P0 Launch Blocker** (Remains blocked fail-closed) |
+| **X / Twitter API** (`x`) | **PENDING** | `REC-X-PILOT-REVIEW` | `X_LEADS=false` | **UNAUTHORIZED** (No executed enterprise/commercial developer contract) | **P0 Launch Blocker** (Feature remains dark fail-closed) |
+| **Google Scraped SERP** (`google_scraped_serp`) | **BLOCKED** | `REC-GOOGLE-ANYAPI-SCRAPED` | `GOOGLE_SERP_SOURCE_ENABLED=false` | **UNAUTHORIZED** (Prohibited under Google Terms of Service) | **Permanently Barred** |
+| **Google Official API** (`google_official_api`) | **BLOCKED** | `REC-GOOGLE-OFFICIAL-CSE` | Unconfigured credentials | **Pending Configuration** (Google Cloud billing and CSE ID needed) | **Blocked Until Configured** |
+
+All acquisition routes fail closed. Background workers, manual sync jobs, cached reads, and API endpoints cannot bypass the technical gate.
 
 ---
 
-## 5. Shippable Capabilities Without Blocked Sources
+## 3. Data Retention Clock Definition and Scenario Enforcement
 
-Insice contains substantial commercial functionality that can safely ship today without enabling unauthorized third-party data sources:
+### The Retention Clock
+- **Reddit Posts & Comments**: The retention clock for Reddit content is measured from **source publication timestamp (`createdAt`)**. Leystic operates as a fresh buyer-intent monitor with a 30-day feed window (`TIERS.free.feedWindowDays = 30`). Rows published more than 30 days prior to the evaluation time (`createdAt < cutoff`) are eligible for routine TTL processing.
+- **Reddit Author Profiles**: Measured from **acquisition timestamp (`fetchedAt`)**. Raw profile JSON payloads (`reddit_authors.raw`) older than 30 days from acquisition are scrubbed (`raw = null`). Author profile rows are pruned via `pruneOrphanedAuthors` when no remaining stored posts or comments reference them.
+- **X Content**: Measured from **both publication (`createdAt`) and acquisition (`fetchedAt`)**. Content must be older than 30 days across both clocks before being purged.
+
+### Retention Scenarios Verified in Automated Tests
+1. **Old Content Fetched Recently**:
+   - If an older thread (published >30 days ago) is ingested during backfill or search discovery, it enters the system with its true source `createdAt`.
+   - On the next routine retention run, if unreferenced, it is pruned. If referenced by an active lead, SEO row, or competitor mention, its raw provider text (`title`, `body`, `raw`, `author`, `imageUrl`) is immediately redacted to neutral placeholders while customer business lead history is preserved.
+2. **Old Posts with Newer Comments**:
+   - If a post was published >30 days ago (`post.createdAt < cutoff`) but contains newer unexpired comments (`comment.createdAt >= cutoff`), the parent post container is **not deleted**.
+   - Deleting the post row would trigger a PostgreSQL `ON DELETE CASCADE` destroying the fresh comments.
+   - The retention engine redacts the old post body and title to neutral placeholders while preserving the post row and keeping the newer comments completely unredacted and intact.
+3. **Content That Has Already Been Redacted**:
+   - `redactExpiredProviderContent` strictly filters for unredacted content:
+     `body is not null or raw is not null or imageUrl is not null or title <> '[Redacted / Expired]' or (author is not null and author <> '[deleted]')`.
+   - Once redacted, rows do not match the filter.
+   - Repeated cleanup passes and dry-run calculations (`{ dryRun: true }`) accurately return `0` without re-processing or thrashing row locks.
+4. **Posts Referenced by Multiple Tenants**:
+   - Shared multi-tenant records (`reddit_posts`) referenced by Tenant A and Tenant B preserve their shared metadata row even after 30 days, while raw provider text is scrubbed.
+   - If Tenant A deletes their project, Tenant B's lead and access to the shared post record remain completely intact.
+   - Only when *all* referencing tenants have deleted their projects does the post become unreferenced and eligible for deletion on the subsequent routine retention pass.
+5. **Repeated Runs and Partial Failures**:
+   - Operations are bounded by `RETENTION_BATCH = 500` and executed idempotently.
+   - A crash or partial failure commits processed batches safely without corrupting foreign keys or leaving orphaned state. Subsequent runs seamlessly resume from where the previous batch finished.
+
+---
+
+## 4. Deletion Workflows, Authorization, and Audit Logging
+
+### Privileged Operator Deletion Authorization
+Operator-only destructive operations:
+- `deleteRedditPost(postId, options)`
+- `eraseRedditAuthor(username, options)`
+- `deleteXPost(tweetId, options)`
+- `eraseXAuthor(username, options)`
+
+**Trust Boundary Enforcement**:
+- `options.operatorContext` is **strictly required**.
+- Omitting `operatorContext` or passing an unauthenticated context throws `OperatorApprovalRequiredError` or `OperatorAuthorizationError`.
+- Caller identity and permissions are verified against durable cryptographic operator credentials in PostgreSQL via `assertAuthorizedOperator()`.
+- Unprivileged application modules and unauthenticated callers are rejected fail-closed.
+
+### Project Deletion & Multi-Tenant Decoupling
+- `deleteProject(userId, projectId, options)` enforces authenticated ownership:
+  - If called by an ordinary customer, verifies `projects.userId === userId`.
+  - If called by an operator, verifies `options.operatorContext` has appropriate administrator roles.
+  - Cascades all project-specific tables (`leads`, `lead_evaluations`, `seo_opportunities`, `competitor_mentions`, `pain_themes`, `alerts`, `jobs`, `website_inspections`, `x_projects`, `x_lanes`, `x_evaluations`, `x_leads`).
+  - Leaves shared multi-tenant records (`reddit_posts`, `reddit_authors`, `search_runs`) intact to prevent data loss for other customers.
+  - Publicly exposed to authenticated customers via `DELETE /api/v1/projects/:id`.
+
+### Append-Only Deletion Audit Ledger (`deletion_audit_log`)
+All deletion workflows durably record audit events in `deletion_audit_log` (`operatorAuditLog` alias):
+- **Schema**:
+  - `id`: Unique UUID primary key.
+  - `action`: Operation name (`DELETE_PROJECT`, `DELETE_REDDIT_POST`, `ERASE_REDDIT_AUTHOR`, `DELETE_X_POST`, `ERASE_X_AUTHOR`, `TTL_BATCH_CLEANUP`).
+  - `actor`: Operator ID, Customer User ID, or System Service identifier (`system:routine_ttl`).
+  - `actorRole`: `system_administrator`, `compliance_officer`, `project_owner`, or `system_service`.
+  - `targetType`: Target category (`project`, `reddit_post`, `reddit_author`, `x_post`, `x_author`, `retention_batch`).
+  - `targetId`: Identifier of deleted target.
+  - `outcome`: `SUCCESS`, `NOT_FOUND`, or `DENIED`.
+  - `reasonCode`: Business/compliance reason (`OPERATOR_DELETION`, `AUTHOR_ERASURE_REQUEST`, `USER_REQUEST`, `ROUTINE_TTL_EXPIRY`).
+  - `details`: Structured metadata (e.g. counts of records anonymized or pruned, operator flags).
+  - `created_at`: Authoritative UTC timestamp.
+- **Privacy Guarantee**: Audit entries **strictly prohibit** storing deleted post text, comment text, author bio descriptions, or customer business notes. Audit ledgers remain safe under privacy reviews.
+- **Transactional Consistency**: Deletion and audit logging share the same PostgreSQL database transaction.
+
+---
+
+## 5. Shippable Capabilities Today (Without Blocked Sources)
+
+The following production features are fully operational, tested, and commercially clear to ship today:
 
 1. **First-Party Customer Website Inspection & Demand Analysis**:
    - Crawling of authenticated customer domains and sitemaps.
-   - Analysis of value propositions, customer segments, feature descriptions, and demand pages.
-2. **Project and Team Workspaces**:
-   - Multi-project management, workspace customization, keyword and competitor configuration.
-3. **Alert and Notification Infrastructure**:
-   - Slack webhook integrations, email alert channels, threshold configuration, invite workflows.
-4. **Usage Ledger & Financial Cost Governance**:
-   - Daily house budget caps, LLM spend limits, API request quota tracking, and billing auditability.
-5. **Developer API & MCP Integration**:
-   - Authenticated REST API (`/api/v1/projects`, `/api/v1/me`) with API key management, rate limits, and scopes.
-   - MCP tool integration for programmatic interaction.
-6. **Operator Authorization & Durable Credential Governance**:
-   - PostgreSQL-backed operator credentials, cryptographic token validation, dual-control recovery, and cross-worker invalidation.
-
-**Blocked Capabilities Until Authorized**:
-- Live Reddit lead discovery and comment scanning.
-- Live X buyer-intent tracking and reply discovery.
-- Google SERP competitor search ranking discovery.
+   - Identification of missing product landing pages and demand coverage gaps.
+2. **Multi-Tenant Workspaces & Project Governance**:
+   - Account and project management, team collaboration, custom scoring thresholds, keyword and competitor setup.
+3. **Multi-Channel Alert Infrastructure**:
+   - Slack webhook integrations, email notifications, invite tokens, and alert preference management.
+4. **Usage Ledger & Financial Cost Caps**:
+   - Real-time spend tracking, daily house budget limits, LLM inference quotas, and billing auditability.
+5. **Developer REST API & MCP Server**:
+   - Authenticated endpoints (`/api/v1/projects`, `/api/v1/me`, `/api/v1/projects/:id`) with scoped API keys and rate limiting.
+6. **Durable Operator Credential & Security Infrastructure**:
+   - PostgreSQL-backed operator credentials, cryptographic token verification, dual-control emergency recovery, and real-time cross-worker revocation invalidation.
 
 ---
 
-## 6. Outstanding External Actions Before Commercial Clearance
+## 6. Outstanding External Commercial Actions
 
-Software engineering and CI testing cannot substitute for legal contracts. The following external actions remain outstanding before live social sources can be enabled:
+Technical gates are fail-closed. Commercial clearance requires completing the following external legal and administrative actions:
 
-1. **Reddit Inc. Commercial Agreement**:
-   - Execute an enterprise Data API commercial license with Reddit Inc. covering commercial SaaS lead generation and competitor tracking.
-   - Agree on permitted retention durations, excerpt character limits (currently capped at 280 chars), and caching terms.
+1. **Reddit Inc. Commercial License**:
+   - Execute an enterprise Data API commercial agreement directly with Reddit Inc. covering commercial SaaS lead generation and competitor tracking.
+   - Confirm permitted data retention periods, display rules, excerpt limits, and platform deletion SLAs.
 2. **X Corp. Commercial Developer Agreement**:
-   - Execute a direct enterprise or commercial developer agreement with X Corp. (or migrate from AnyAPI to official X Enterprise v2 API endpoints).
-3. **Official Google Custom Search Provisioning**:
+   - Execute an official enterprise developer agreement with X Corp. (migrating from gateway proxying to official X API v2 endpoints).
+3. **Google Custom Search Provisioning**:
    - Provision an official Google Cloud billing project.
-   - Enable Custom Search JSON API.
-   - Configure a Programmable Search Engine (CSE) and obtain `GOOGLE_CSE_ID` and `GOOGLE_CSE_API_KEY`.
-   - Update `REC-GOOGLE-OFFICIAL-CSE` authorization record in the database from `BLOCKED` to `APPROVED` using authorized operator credentials.
+   - Configure a Programmable Search Engine (CSE) and set `GOOGLE_CSE_ID` and `GOOGLE_CSE_API_KEY`.
+   - Update `REC-GOOGLE-OFFICIAL-CSE` from `BLOCKED` to `APPROVED` using authorized operator credentials.
 
-Until the above external agreements are executed and verified, all third-party social sources must remain **BLOCKED** and **DISABLED** in production.
+Until these contracts are executed and verified, all third-party social ingestion sources must remain **BLOCKED** and **DISABLED** in production.

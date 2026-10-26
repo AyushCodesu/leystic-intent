@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { boolean, index, integer, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 export type SourceAuthStatus = "PENDING" | "APPROVED" | "BLOCKED" | "EXPIRED";
@@ -155,3 +156,36 @@ export const operatorBootstrapState = pgTable("operator_bootstrap_state", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Append-only durable audit trail recording administrative and customer deletion actions.
+ * Records target type, target ID, actor identity, timestamp, and safe metadata.
+ * Strictly avoids retaining deleted post text, comment text, or personal profiles.
+ */
+export const deletionAuditLog = pgTable(
+  "deletion_audit_log",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
+    action: text("action").notNull(), // e.g. "DELETE_POST" | "ERASE_AUTHOR" | "DELETE_PROJECT" | "TTL_BATCH_CLEANUP"
+    actor: text("actor").notNull(), // operator ID, user ID, or system service name
+    actorRole: text("actor_role").notNull(), // "system_administrator" | "compliance_officer" | "project_owner" | "system_service"
+    targetType: text("target_type").notNull(), // "reddit_post" | "reddit_author" | "x_post" | "x_author" | "project" | "retention_batch"
+    targetId: text("target_id").notNull(),
+    outcome: text("outcome").notNull(), // "SUCCESS" | "NOT_FOUND" | "DENIED"
+    reasonCode: text("reason_code").notNull(), // e.g. "OPERATOR_DELETION" | "AUTHOR_ERASURE_REQUEST" | "USER_REQUEST" | "ROUTINE_TTL_EXPIRY"
+    details: jsonb("details").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("deletion_audit_log_target_idx").on(t.targetType, t.targetId),
+    index("deletion_audit_log_actor_idx").on(t.actor),
+    index("deletion_audit_log_created_at_idx").on(t.createdAt),
+  ],
+);
+
+/**
+ * Alias for deletionAuditLog referenced across operator audit documentation.
+ */
+export const operatorAuditLog = deletionAuditLog;

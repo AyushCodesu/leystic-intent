@@ -36,9 +36,7 @@ jobs:
           # What a local .env gives the same suites. The key is 32 zero bytes.
           APP_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
           SELF_HOSTED: "true"
-      # Main's image is built by the deploy, which fails before it pushes when
-      # the build does, so building here as well only pays off on a pull request.
+      # Build Next.js application to independently verify production compilation on CI.
       - run: npx next build
-        if: github.event_name == 'pull_request'
         env:
           NEXT_TELEMETRY_DISABLED: "1"
