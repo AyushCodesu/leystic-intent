@@ -183,8 +183,8 @@ describeDb("targeted deletion and author erasure workflows", () => {
     const authorActive = `active_${randomUUID().slice(0, 6)}`;
 
     await db().insert(schema.redditAuthors).values([
-      { username: authorOrphan, karma: 100, fetchedAt: POSTS_NOW },
-      { username: authorActive, karma: 200, raw: { bio: "active" }, fetchedAt: POSTS_NOW },
+      { username: authorOrphan, karma: 100, fetchedAt: new Date(LONG_AGO * 1000) },
+      { username: authorActive, karma: 200, raw: { bio: "active" }, fetchedAt: new Date(LONG_AGO * 1000) },
     ]);
 
     const [post] = await db()
