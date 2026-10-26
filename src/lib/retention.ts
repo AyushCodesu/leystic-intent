@@ -16,6 +16,16 @@ import {
 } from "@/db/schema";
 export { deleteProject } from "./projects";
 export { deleteXPost, eraseXAuthor } from "./x/retention";
+import {
+  ALLOWED_DELETION_REASON_CODES,
+  type DeletionReasonCode,
+  validateDeletionReasonCode,
+} from "./retentionReason";
+export {
+  ALLOWED_DELETION_REASON_CODES,
+  type DeletionReasonCode,
+  validateDeletionReasonCode,
+};
 import { competitorMentions } from "@/db/schema/competitors";
 import { assertAuthorizedOperator, ensureSourcePolicyFresh, type OperatorContext } from "./sourcePolicy";
 import { daysAgo } from "./time";
@@ -409,7 +419,7 @@ export async function deleteExpiredPosts(
  */
 export async function deleteRedditPost(
   postId: string,
-  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: string },
+  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: DeletionReasonCode | string },
 ): Promise<{ deleted: boolean; notFound?: boolean; dryRun?: boolean; postId: string }> {
   if (!options?.operatorContext) {
     throw new OperatorApprovalRequiredError("delete_reddit_post");
@@ -463,7 +473,7 @@ export async function deleteRedditPost(
       targetType: "reddit_post",
       targetId: postId,
       outcome: "SUCCESS",
-      reasonCode: options.reason ?? "OPERATOR_DELETION",
+      reasonCode: validateDeletionReasonCode(options.reason, "OPERATOR_DELETION"),
       details: {
         authorPruned,
       },
@@ -489,7 +499,7 @@ export function generateOpaqueAuthorTargetId(): string {
  */
 export async function eraseRedditAuthor(
   username: string,
-  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: string },
+  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: DeletionReasonCode | string },
 ): Promise<{ erased: boolean; notFound?: boolean; dryRun?: boolean; username: string }> {
   if (!options?.operatorContext) {
     throw new OperatorApprovalRequiredError("erase_reddit_author");
@@ -543,7 +553,7 @@ export async function eraseRedditAuthor(
       targetType: "reddit_author",
       targetId: generateOpaqueAuthorTargetId(),
       outcome: "SUCCESS",
-      reasonCode: options.reason ?? "AUTHOR_ERASURE_REQUEST",
+      reasonCode: validateDeletionReasonCode(options.reason, "AUTHOR_ERASURE_REQUEST"),
       details: {
         postsAnonymized: matchingPosts.length,
         commentsAnonymized: matchingComments.length,

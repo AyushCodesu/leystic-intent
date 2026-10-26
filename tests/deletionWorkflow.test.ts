@@ -1031,6 +1031,189 @@ describeDb("targeted deletion and author erasure workflows", () => {
     expect(failedAudit.details).toMatchObject({
       source: "x",
     });
-    expect((failedAudit.details as Record<string, unknown>).errorMessage).toBeDefined();
+    expect((failedAudit.details as Record<string, unknown>).failureCategory).toBeDefined();
+    expect((failedAudit.details as Record<string, unknown>).errorCode).toBeDefined();
+    expect((failedAudit.details as Record<string, unknown>).errorMessage).toBeUndefined();
+  });
+
+  it("rejects arbitrary free-form text, usernames, and provider quotes in reasonCode across deletion workflows", async () => {
+    setupAdminCredential();
+    const { db } = await import("@/db");
+    const schema = await import("@/db/schema");
+    const { deleteRedditPost, eraseRedditAuthor } = await import("@/lib/retention");
+    const { deleteXPost, eraseXAuthor } = await import("@/lib/x/retention");
+    const { deleteProject } = await import("@/lib/projects");
+    const { and, desc, eq } = await import("drizzle-orm");
+
+    const authorName = `leaky_author_${randomUUID().slice(0, 6)}`;
+    const postId = `p${randomUUID().slice(0, 8)}`;
+    const tweetId = `tweet_${randomUUID().slice(0, 8)}`;
+    const xUser = `x_leaker_${randomUUID().slice(0, 6)}`;
+
+    const user = await makeUser();
+    const project = await makeProject(user.id);
+
+    await db().insert(schema.redditPosts).values({
+      id: postId,
+      subreddit: "saas",
+      author: authorName,
+      title: "Confidential post content",
+      url: "https://reddit.com/r/saas/comments/leaky/",
+      createdAt: new Date(),
+    });
+    await db().insert(schema.redditAuthors).values({ username: authorName, karma: 10 });
+    await db().insert(schema.xPosts).values({
+      id: tweetId,
+      text: "Confidential sensitive tweet text",
+      authorUsername: xUser,
+      createdAt: new Date(),
+    });
+    await db().insert(schema.xAuthors).values({ username: xUser, name: "Leaky X" });
+
+    // 1. eraseRedditAuthor with malicious/leaky reason
+    const leakyReasonAuthor = `User ${authorName} requested immediate removal of quote: 'buy my tool now!'`;
+    await eraseRedditAuthor(authorName, {
+      operatorContext: adminContext,
+      reason: leakyReasonAuthor,
+    });
+
+    const [auditAuthor] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "ERASE_REDDIT_AUTHOR"), eq(schema.deletionAuditLog.actor, adminContext.operatorId)))
+      .orderBy(desc(schema.deletionAuditLog.createdAt))
+      .limit(1);
+
+    expect(auditAuthor.reasonCode).toBe("AUTHOR_ERASURE_REQUEST");
+    expect(auditAuthor.reasonCode).not.toContain(authorName);
+    expect(auditAuthor.reasonCode).not.toContain("buy my tool now");
+    expect(JSON.stringify(auditAuthor)).not.toContain(authorName);
+    expect(JSON.stringify(auditAuthor)).not.toContain("buy my tool now");
+
+    // 2. deleteRedditPost with leaky reason
+    const leakyReasonPost = `Deleted because post ${postId} by author ${authorName} contained illegal quote`;
+    await deleteRedditPost(postId, {
+      operatorContext: adminContext,
+      reason: leakyReasonPost,
+    });
+
+    const [auditPost] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "DELETE_REDDIT_POST"), eq(schema.deletionAuditLog.targetId, postId)))
+      .limit(1);
+
+    expect(auditPost.reasonCode).toBe("OPERATOR_DELETION");
+    expect(auditPost.reasonCode).not.toContain(authorName);
+    expect(auditPost.reasonCode).not.toContain("illegal quote");
+    expect(JSON.stringify(auditPost)).not.toContain(authorName);
+    expect(JSON.stringify(auditPost)).not.toContain("illegal quote");
+
+    // 3. eraseXAuthor with leaky reason
+    await eraseXAuthor(xUser, {
+      operatorContext: adminContext,
+      reason: `Remove @${xUser} because bio said 'confidential'`,
+    });
+
+    const [auditXAuthor] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "ERASE_X_AUTHOR"), eq(schema.deletionAuditLog.actor, adminContext.operatorId)))
+      .orderBy(desc(schema.deletionAuditLog.createdAt))
+      .limit(1);
+
+    expect(auditXAuthor.reasonCode).toBe("AUTHOR_ERASURE_REQUEST");
+    expect(auditXAuthor.reasonCode).not.toContain(xUser);
+    expect(JSON.stringify(auditXAuthor)).not.toContain(xUser);
+    expect(JSON.stringify(auditXAuthor)).not.toContain("confidential");
+
+    // 4. deleteXPost with leaky reason
+    await deleteXPost(tweetId, {
+      operatorContext: adminContext,
+      reason: `Takedown tweet ${tweetId} text: 'sensitive confidential'`,
+    });
+
+    const [auditXPost] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "DELETE_X_POST"), eq(schema.deletionAuditLog.targetId, tweetId)))
+      .limit(1);
+
+    expect(auditXPost.reasonCode).toBe("OPERATOR_DELETION");
+    expect(auditXPost.reasonCode).not.toContain("sensitive confidential");
+    expect(JSON.stringify(auditXPost)).not.toContain("sensitive confidential");
+
+    // 5. deleteProject with leaky reason
+    await deleteProject(user.id, project.id, {
+      reason: `Delete project for customer notes: 'private company strategy'`,
+    });
+
+    const [auditProject] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(and(eq(schema.deletionAuditLog.action, "DELETE_PROJECT"), eq(schema.deletionAuditLog.targetId, project.id)))
+      .limit(1);
+
+    expect(auditProject.reasonCode).toBe("USER_REQUEST");
+    expect(auditProject.reasonCode).not.toContain("private company strategy");
+    expect(JSON.stringify(auditProject)).not.toContain("private company strategy");
+
+    await db().delete(schema.users).where(eq(schema.users.id, user.id));
+  });
+
+  it("prevents simulated cleanup exceptions containing usernames, bios, or provider text from leaking into audit details", async () => {
+    const { db } = await import("@/db");
+    const schema = await import("@/db/schema");
+    const { deleteExpiredXData } = await import("@/lib/x/retention");
+    const { and, desc, eq } = await import("drizzle-orm");
+
+    const sensitiveAuthor = `leak_user_${randomUUID().slice(0, 6)}`;
+    const sensitiveBio = "SuperSecretPersonalBio123";
+    const sensitiveTweet = "ConfidentialTweetPayloadText999";
+
+    // Simulate an error thrown during cleanup that embeds raw PII and provider text
+    const leakError = new Error(
+      `PostgreSQL fatal error processing author @${sensitiveAuthor} with bio '${sensitiveBio}' and tweet '${sensitiveTweet}'`,
+    );
+    leakError.name = "DatabaseConnectionError";
+
+    const originalSelect = db().select;
+    try {
+      db().select = (() => {
+        throw leakError;
+      }) as never;
+
+      await expect(deleteExpiredXData(new Date())).rejects.toThrow();
+    } finally {
+      db().select = originalSelect;
+    }
+
+    // Verify the failure audit record was written
+    const [failedAudit] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(
+        and(
+          eq(schema.deletionAuditLog.action, "TTL_BATCH_CLEANUP"),
+          eq(schema.deletionAuditLog.targetType, "x_retention_batch"),
+          eq(schema.deletionAuditLog.outcome, "FAILURE"),
+        ),
+      )
+      .orderBy(desc(schema.deletionAuditLog.createdAt))
+      .limit(1);
+
+    expect(failedAudit).toBeDefined();
+    expect(failedAudit.outcome).toBe("FAILURE");
+    expect(failedAudit.reasonCode).toBe("ROUTINE_TTL_FAILURE");
+    // Verify allowlisted failure category and error code are set
+    expect((failedAudit.details as Record<string, unknown>).failureCategory).toBe("CONNECTION_ERROR");
+    expect((failedAudit.details as Record<string, unknown>).errorCode).toBe("ERR_TTL_CONNECTION");
+
+    // ABSOLUTE PRIVACY GUARANTEE: neither username, bio, nor tweet text is stored in audit ledger
+    const auditStr = JSON.stringify(failedAudit);
+    expect(auditStr).not.toContain(sensitiveAuthor);
+    expect(auditStr).not.toContain(sensitiveBio);
+    expect(auditStr).not.toContain(sensitiveTweet);
+    expect(auditStr).not.toContain("PostgreSQL fatal error");
   });
 });

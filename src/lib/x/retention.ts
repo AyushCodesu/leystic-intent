@@ -4,10 +4,49 @@ import { db } from "@/db";
 import { deletionAuditLog, xAuthors, xLanes, xPosts, xRuns } from "@/db/schema";
 import { assertAuthorizedOperator, ensureSourcePolicyFresh, type OperatorContext } from "@/lib/sourcePolicy";
 import { deleteInBatches, OperatorApprovalRequiredError, RETENTION_BATCH } from "@/lib/retention";
+import { validateDeletionReasonCode, type DeletionReasonCode } from "@/lib/retentionReason";
 import { daysAgo } from "@/lib/time";
 import { RETENTION_DAYS } from "@/lib/tiers";
 
 const RUN_HISTORY_DAYS = 90;
+
+/** Allowlisted failure categories for privacy-safe cleanup failure diagnostics in audit ledgers. */
+export const ALLOWED_FAILURE_CATEGORIES = [
+  "DATABASE_ERROR",
+  "TIMEOUT_ERROR",
+  "CONNECTION_ERROR",
+  "CONSTRAINT_VIOLATION",
+  "INTERNAL_ERROR",
+] as const;
+
+export type CleanupFailureCategory = (typeof ALLOWED_FAILURE_CATEGORIES)[number];
+
+/**
+ * Categorizes cleanup exceptions into safe, stable error codes and failure categories.
+ * Strictly avoids persisting unrestricted exception messages or provider data into audit ledgers.
+ */
+export function categorizeCleanupError(error: unknown): {
+  failureCategory: CleanupFailureCategory;
+  errorCode: string;
+} {
+  if (error instanceof Error) {
+    const name = error.name.toUpperCase();
+    const msg = error.message.toLowerCase();
+    if (name.includes("TIMEOUT") || msg.includes("timeout")) {
+      return { failureCategory: "TIMEOUT_ERROR", errorCode: "ERR_TTL_TIMEOUT" };
+    }
+    if (name.includes("CONNECTION") || msg.includes("connection")) {
+      return { failureCategory: "CONNECTION_ERROR", errorCode: "ERR_TTL_CONNECTION" };
+    }
+    if (name.includes("CONSTRAINT") || msg.includes("constraint")) {
+      return { failureCategory: "CONSTRAINT_VIOLATION", errorCode: "ERR_TTL_CONSTRAINT" };
+    }
+    if (name.includes("POSTGRES") || name.includes("DRIZZLE") || "code" in error) {
+      return { failureCategory: "DATABASE_ERROR", errorCode: "ERR_TTL_DATABASE" };
+    }
+  }
+  return { failureCategory: "INTERNAL_ERROR", errorCode: "ERR_TTL_INTERNAL" };
+}
 
 /**
  * Drops X content past the retention window. Unlike Reddit, a lead does not
@@ -87,7 +126,11 @@ export async function deleteExpiredXData(now = new Date()): Promise<{ posts: num
 
     return { posts, authors: authorsCount };
   } catch (error) {
+    // Log exception type to operational logging only, without persisting raw message in audit ledger
+    console.error("[x_retention] Scheduled cleanup failed:", error instanceof Error ? error.name : "Unknown error");
+
     try {
+      const { failureCategory, errorCode } = categorizeCleanupError(error);
       await db().insert(deletionAuditLog).values({
         action: "TTL_BATCH_CLEANUP",
         actor: "system:routine_ttl",
@@ -101,7 +144,8 @@ export async function deleteExpiredXData(now = new Date()): Promise<{ posts: num
           cutoff: safeCutoffStr,
           deletedPosts: posts,
           deletedAuthors: authorsCount,
-          errorMessage: error instanceof Error ? error.message : "Unknown error",
+          failureCategory,
+          errorCode,
         },
       });
     } catch {
@@ -117,7 +161,7 @@ export async function deleteExpiredXData(now = new Date()): Promise<{ posts: num
  */
 export async function deleteXPost(
   tweetId: string,
-  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: string },
+  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: DeletionReasonCode | string },
 ): Promise<{ deleted: boolean; notFound?: boolean; dryRun?: boolean; tweetId: string }> {
   if (!options?.operatorContext) {
     throw new OperatorApprovalRequiredError("delete_x_post");
@@ -148,7 +192,7 @@ export async function deleteXPost(
       targetType: "x_post",
       targetId: tweetId,
       outcome: "SUCCESS",
-      reasonCode: options.reason ?? "OPERATOR_DELETION",
+      reasonCode: validateDeletionReasonCode(options.reason, "OPERATOR_DELETION"),
       details: {},
     });
 
@@ -162,7 +206,7 @@ export async function deleteXPost(
  */
 export async function eraseXAuthor(
   username: string,
-  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: string },
+  options: { operatorContext: OperatorContext; dryRun?: boolean; reason?: DeletionReasonCode | string },
 ): Promise<{ erased: boolean; notFound?: boolean; dryRun?: boolean; username: string }> {
   if (!options?.operatorContext) {
     throw new OperatorApprovalRequiredError("erase_x_author");
@@ -194,7 +238,7 @@ export async function eraseXAuthor(
       targetType: "x_author",
       targetId: opaqueTargetId,
       outcome: "SUCCESS",
-      reasonCode: options.reason ?? "AUTHOR_ERASURE_REQUEST",
+      reasonCode: validateDeletionReasonCode(options.reason, "AUTHOR_ERASURE_REQUEST"),
       details: {},
     });
 

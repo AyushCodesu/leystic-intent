@@ -5,6 +5,7 @@ import { db } from "@/db";
 import { deletionAuditLog, projects, users } from "@/db/schema";
 import { forgetProjectFeed } from "./projectFeedCache";
 import { assertAuthorizedOperator, ensureSourcePolicyFresh, type OperatorContext } from "./sourcePolicy";
+import { validateDeletionReasonCode, type DeletionReasonCode } from "./retentionReason";
 import { limitsFor } from "./tiers";
 import { config } from "./config";
 import { tierNameFor } from "./anyapi";
@@ -73,7 +74,7 @@ export async function requireActiveProject(userId: string, requested?: string): 
   if (!project) {
     redirect("/app/projects/new");
   }
-return project;
+  return project;
 }
 
 /**
@@ -86,7 +87,7 @@ return project;
 export async function deleteProject(
   userId: string,
   projectId: string,
-  options: { operatorContext?: OperatorContext; reason?: string } = {},
+  options: { operatorContext?: OperatorContext; reason?: DeletionReasonCode | string } = {},
 ): Promise<{ deleted: boolean; notFound?: boolean; projectId: string }> {
   let isOperator = false;
   let actor = userId;
@@ -117,6 +118,7 @@ export async function deleteProject(
     // Cascade deletion of all project-scoped tables in PostgreSQL
     await tx.delete(projects).where(eq(projects.id, projectId));
 
+    const defaultReason: DeletionReasonCode = isOperator ? "OPERATOR_DELETION" : "USER_REQUEST";
     await tx.insert(deletionAuditLog).values({
       action: "DELETE_PROJECT",
       actor,
@@ -124,7 +126,7 @@ export async function deleteProject(
       targetType: "project",
       targetId: projectId,
       outcome: "SUCCESS",
-      reasonCode: options.reason ?? (isOperator ? "OPERATOR_DELETION" : "USER_REQUEST"),
+      reasonCode: validateDeletionReasonCode(options.reason, defaultReason),
       details: {
         isOperator,
         projectOwnerId: existing[0].userId,
