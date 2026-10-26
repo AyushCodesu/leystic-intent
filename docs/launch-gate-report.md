@@ -22,9 +22,9 @@ An exhaustive audit of all database schemas (`src/db/schema/shared.ts`, `src/db/
 | `reddit_comments.body` | Reddit comment body text | **Yes** (Full comment) | Potentially in comment | Follows parent (max 30d) | **Redacted**: Set to `null` past 30 days; dropped via CASCADE on unreferenced post deletion. |
 | `reddit_comments.raw` | Raw Reddit API comment JSON | **Yes** (Full payload) | **Yes** (Metadata, author) | Follows parent (max 30d) | **Redacted**: Set to `null` past 30 days. |
 | `reddit_comments.author` | Reddit comment author username | No | **Yes** (Online identity) | Follows parent (max 30d) | **Anonymized**: Replaced with `[deleted]` (`REDACTED_AUTHOR`) past 30 days. |
-| `reddit_authors.avatarUrl` | Reddit profile avatar image | No | **Yes** (User image) | 30 days / unreferenced | Pruned via `pruneOrphanedAuthors` when author has no active posts or comments. |
-| `reddit_authors.karma` | Reddit karma score | No | No | 30 days / unreferenced | Pruned when orphaned. |
-| `reddit_authors.accountCreatedAt`| Reddit account opening date | No | No | 30 days / unreferenced | Pruned when orphaned. |
+| `reddit_authors.avatarUrl` | Reddit profile avatar image | No | **Yes** (User image) | **30 days from fetch** | **Scrubbed**: Set to `null` past 30 days from `fetchedAt` even if author is referenced; row deleted when unreferenced. |
+| `reddit_authors.karma` | Reddit karma score | No | No | **30 days from fetch** | **Scrubbed**: Set to `null` past 30 days from `fetchedAt`; row deleted when unreferenced. |
+| `reddit_authors.accountCreatedAt`| Reddit account opening date | No | No | **30 days from fetch** | **Scrubbed**: Set to `null` past 30 days from `fetchedAt`; row deleted when unreferenced. |
 | `reddit_authors.raw` | Raw Reddit author API payload | **Yes** (Bio & metadata) | **Yes** (Full profile) | **30 days from fetch** | **Scrubbed**: Set to `null` past 30 days from `fetchedAt`; row deleted when unreferenced. |
 | `leads.matchedPhrase` | Verbatim quote from post/comment | **Yes** (Exact snippet) | Potentially | **30 days** | **Redacted**: Set to `null` past 30 days; preserved business lead row (score, stage, status). |
 | `leads.reason` | Synthetic lead classification sentence | **No** (Template sentence built from enums) | **No** | Indefinite | Preserved for customer lead history. Does not copy verbatim provider text. |
@@ -68,7 +68,14 @@ All acquisition routes fail closed. Background workers, manual sync jobs, cached
 
 ### The Retention Clock
 - **Reddit Posts & Comments**: The retention clock for Reddit content is measured from **source publication timestamp (`createdAt`)**. Leystic operates as a fresh buyer-intent monitor with a 30-day feed window (`TIERS.free.feedWindowDays = 30`). Rows published more than 30 days prior to the evaluation time (`createdAt < cutoff`) are eligible for routine TTL processing.
-- **Reddit Author Profiles**: Measured from **acquisition timestamp (`fetchedAt`)**. Raw profile JSON payloads (`reddit_authors.raw`) older than 30 days from acquisition are scrubbed (`raw = null`). Author profile rows are pruned via `pruneOrphanedAuthors` when no remaining stored posts or comments reference them.
+- **Reddit Author Profiles (4-Tier Lifecycle)**:
+  1. *Expiry of Raw Payloads*: Raw API profile payloads (`reddit_authors.raw`) older than 30 days from acquisition (`fetchedAt < cutoff`) are scrubbed (`raw = null`).
+  2. *Expiry of Profile Attributes*: Personal profile fields (`avatarUrl`, `karma`, `accountCreatedAt`) are scrubbed to `null` past 30 days from `fetchedAt` even if the author is still referenced by an active post or comment. Only the primary key identifier (`username`) is preserved to keep relational joins valid.
+  3. *Anonymization of Identifiers*: Upon operator author erasure request (`eraseRedditAuthor`) or Right-to-be-Forgotten actions, referencing posts and comments are anonymized to `[deleted]`, and the author profile row is deleted.
+  4. *Deletion of Orphaned Rows*: Rows in `reddit_authors` with no referencing posts or comments are permanently deleted from database storage via `pruneOrphanedAuthors`.
+- **Comment-Level Competitor Mention Retention**:
+  - Retention strictly respects each record's own publication age. Post-level mentions (`commentId IS NULL`) track `post.createdAt < cutoff`. Comment-level mentions (`commentId IS NOT NULL`) track `comment.createdAt < cutoff`.
+  - When an old post (>30 days) holds a recent comment (<30 days), the comment's competitor evidence (`quote`, `summary`, `switchingEvidence`, `explanation`) is **strictly preserved** until the comment's own 30-day cutoff, preventing premature data loss. Once the comment itself passes 30 days, its quotes and derived narrative fields are scrubbed.
 - **X Content**: Measured from **both publication (`createdAt`) and acquisition (`fetchedAt`)**. Content must be older than 30 days across both clocks before being purged.
 
 ### Retention Scenarios Verified in Automated Tests
@@ -124,16 +131,32 @@ All deletion workflows durably record audit events in `deletion_audit_log` (`ope
   - `action`: Operation name (`DELETE_PROJECT`, `DELETE_REDDIT_POST`, `ERASE_REDDIT_AUTHOR`, `DELETE_X_POST`, `ERASE_X_AUTHOR`, `TTL_BATCH_CLEANUP`).
   - `actor`: Operator ID, Customer User ID, or System Service identifier (`system:routine_ttl`).
   - `actorRole`: `system_administrator`, `compliance_officer`, `project_owner`, or `system_service`.
-  - `targetType`: Target category (`project`, `reddit_post`, `reddit_author`, `x_post`, `x_author`, `retention_batch`).
-  - `targetId`: Identifier of deleted target.
-  - `outcome`: `SUCCESS`, `NOT_FOUND`, or `DENIED`.
-  - `reasonCode`: Business/compliance reason (`OPERATOR_DELETION`, `AUTHOR_ERASURE_REQUEST`, `USER_REQUEST`, `ROUTINE_TTL_EXPIRY`).
-  - `details`: Structured metadata (e.g. counts of records anonymized or pruned, operator flags).
+  - `targetType`: Target category (`project`, `reddit_post`, `reddit_author`, `x_post`, `x_author`, `retention_batch`, `x_retention_batch`).
+  - `targetId`: Opaque target identifier or batch timestamp.
+  - `outcome`: `SUCCESS`, `NOT_FOUND`, `DENIED`, or `FAILURE`.
+  - `reasonCode`: Business/compliance reason (`OPERATOR_DELETION`, `AUTHOR_ERASURE_REQUEST`, `USER_REQUEST`, `ROUTINE_TTL_EXPIRY`, `ROUTINE_TTL_FAILURE`).
+  - `details`: Structured non-identifying metadata (e.g. counts of records deleted, anonymized, or pruned).
   - `created_at`: Authoritative UTC timestamp.
-- **Privacy Guarantee**: Audit entries **strictly prohibit** storing deleted post text, comment text, author bio descriptions, or customer business notes. Audit ledgers remain safe under privacy reviews.
-- **Transactional Consistency**: Deletion and audit logging share the same PostgreSQL database transaction.
 
----
+- **Database-Level Immutability Enforcement**:
+  - Strictly append-only at the PostgreSQL database level via migration `0047_immutable_deletion_audit.sql`.
+  - Row-level trigger `trg_prevent_deletion_audit_log_mutation` rejects all `UPDATE` and `DELETE` operations with PostgreSQL exception `deletion_audit_log is an append-only audit ledger: UPDATE and DELETE operations are prohibited`.
+  - Table-level statement trigger `trg_prevent_deletion_audit_log_truncate` rejects `TRUNCATE` operations with `deletion_audit_log is an append-only audit ledger: TRUNCATE is prohibited`.
+  - Table permissions are locked: `REVOKE TRUNCATE, DELETE, UPDATE ON "deletion_audit_log" FROM PUBLIC;`.
+  - Privileged Access & Maintenance: Normal transactional `INSERT` operations are preserved for application and system services. Only PostgreSQL superusers or the database table owner (e.g. the migration administrator role) possess intrinsic PostgreSQL privileges to alter the schema or toggle triggers for emergency database repair.
+
+- **Author Anonymization & Privacy Guarantees**:
+  - `ERASE_REDDIT_AUTHOR` and `ERASE_X_AUTHOR` write an opaque, non-identifying target reference (`targetId = anon-author-<uuid>`).
+  - The erased username is **strictly excluded** from `targetId`, `details`, `reasonCode`, and all audit fields, preventing dictionary-based deanonymization.
+  - Legacy audit records created before migration 0047 were sanitized to opaque `anon-author-<hash>` IDs and had user keys stripped from details prior to trigger lock-in.
+
+- **Scheduled X Retention Batch Auditing**:
+  - `deleteExpiredXData()` records a `TTL_BATCH_CLEANUP` audit event in `deletion_audit_log` with `targetType: "x_retention_batch"`.
+  - Accurately reports completed counts (`deletedPosts`, `deletedAuthors`, `deletedRuns`, `deletedLanes`).
+  - If a batch failure occurs, a `FAILURE` outcome audit event is recorded with the partial counts actually completed prior to error, avoiding inaccurate deletion claims.
+  - Strictly omits tweet content, handles, and user profiles.
+
+- **Transactional Consistency**: Deletion and audit logging share the same PostgreSQL database transaction.
 
 ## 5. Shippable Capabilities Today (Without Blocked Sources)
 

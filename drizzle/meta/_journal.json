@@ -330,6 +330,13 @@
       "when": 1790897000000,
       "tag": "0046_deletion_audit_log",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1790897100000,
+      "tag": "0047_immutable_deletion_audit",
+      "breakpoints": true
     }
   ]
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { deletionAuditLog, xAuthors, xLanes, xPosts, xRuns } from "@/db/schema";
@@ -24,25 +25,88 @@ const RUN_HISTORY_DAYS = 90;
  */
 export async function deleteExpiredXData(now = new Date()): Promise<{ posts: number; authors: number }> {
   const cutoff = daysAgo(RETENTION_DAYS, now);
-  const expired = db()
-    .select({ id: xPosts.id })
-    .from(xPosts)
-    .where(and(lt(xPosts.createdAt, cutoff), lt(xPosts.fetchedAt, cutoff)))
-    .limit(RETENTION_BATCH);
-  const posts = await deleteInBatches(async () => {
-    const deleted = await db().delete(xPosts).where(inArray(xPosts.id, expired)).returning({ id: xPosts.id });
-    return deleted.length;
-  });
-  const authors = await db()
-    .delete(xAuthors)
-    .where(lt(xAuthors.fetchedAt, cutoff))
-    .returning({ username: xAuthors.username });
   const history = daysAgo(RUN_HISTORY_DAYS, now);
-  await db().delete(xRuns).where(lt(xRuns.startedAt, history));
-  await db()
-    .delete(xLanes)
-    .where(and(eq(xLanes.state, "retired"), sql`coalesce(${xLanes.lastRunAt}, ${xLanes.createdAt}) < ${history.toISOString()}::timestamptz`));
-  return { posts, authors: authors.length };
+
+  let posts = 0;
+  let authorsCount = 0;
+  let runsCount = 0;
+  let lanesCount = 0;
+
+  try {
+    const expired = db()
+      .select({ id: xPosts.id })
+      .from(xPosts)
+      .where(and(lt(xPosts.createdAt, cutoff), lt(xPosts.fetchedAt, cutoff)))
+      .limit(RETENTION_BATCH);
+
+    posts = await deleteInBatches(async () => {
+      const deleted = await db().delete(xPosts).where(inArray(xPosts.id, expired)).returning({ id: xPosts.id });
+      return deleted.length;
+    });
+
+    const authors = await db()
+      .delete(xAuthors)
+      .where(lt(xAuthors.fetchedAt, cutoff))
+      .returning({ username: xAuthors.username });
+    authorsCount = authors.length;
+
+    const deletedRuns = await db().delete(xRuns).where(lt(xRuns.startedAt, history)).returning({ id: xRuns.id });
+    runsCount = deletedRuns.length;
+
+    const deletedLanes = await db()
+      .delete(xLanes)
+      .where(
+        and(
+          eq(xLanes.state, "retired"),
+          sql`coalesce(${xLanes.lastRunAt}, ${xLanes.createdAt}) < ${history.toISOString()}::timestamptz`,
+        ),
+      )
+      .returning({ id: xLanes.id });
+    lanesCount = deletedLanes.length;
+
+    // Record routine TTL batch audit event in append-only deletion audit log
+    await db().insert(deletionAuditLog).values({
+      action: "TTL_BATCH_CLEANUP",
+      actor: "system:routine_ttl",
+      actorRole: "system_service",
+      targetType: "x_retention_batch",
+      targetId: now.toISOString(),
+      outcome: "SUCCESS",
+      reasonCode: "ROUTINE_TTL_EXPIRY",
+      details: {
+        source: "x",
+        cutoff: cutoff.toISOString(),
+        deletedPosts: posts,
+        deletedAuthors: authorsCount,
+        deletedRuns: runsCount,
+        deletedLanes: lanesCount,
+      },
+    });
+
+    return { posts, authors: authorsCount };
+  } catch (error) {
+    try {
+      await db().insert(deletionAuditLog).values({
+        action: "TTL_BATCH_CLEANUP",
+        actor: "system:routine_ttl",
+        actorRole: "system_service",
+        targetType: "x_retention_batch",
+        targetId: now.toISOString(),
+        outcome: "FAILURE",
+        reasonCode: "ROUTINE_TTL_FAILURE",
+        details: {
+          source: "x",
+          cutoff: cutoff.toISOString(),
+          deletedPosts: posts,
+          deletedAuthors: authorsCount,
+          errorMessage: error instanceof Error ? error.message : "Unknown error",
+        },
+      });
+    } catch {
+      // Do not mask original error if audit logging fails
+    }
+    throw error;
+  }
 }
 
 /**
@@ -120,12 +184,13 @@ export async function eraseXAuthor(
   return db().transaction(async (tx) => {
     await tx.delete(xAuthors).where(eq(sql`lower(${xAuthors.username})`, username.toLowerCase()));
 
+    const opaqueTargetId = `anon-author-${randomUUID()}`;
     await tx.insert(deletionAuditLog).values({
       action: "ERASE_X_AUTHOR",
       actor: verified.operatorId,
       actorRole: verified.role,
       targetType: "x_author",
-      targetId: username.toLowerCase(),
+      targetId: opaqueTargetId,
       outcome: "SUCCESS",
       reasonCode: options.reason ?? "AUTHOR_ERASURE_REQUEST",
       details: {},

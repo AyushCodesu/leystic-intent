@@ -446,7 +446,7 @@ describeDb("targeted deletion and author erasure workflows", () => {
     const { db } = await import("@/db");
     const schema = await import("@/db/schema");
     const { eraseRedditAuthor } = await import("@/lib/retention");
-    const { eq } = await import("drizzle-orm");
+    const { and, desc, eq } = await import("drizzle-orm");
 
     const authorName = `erase_me_${randomUUID().slice(0, 6)}`;
     await db().insert(schema.redditAuthors).values({ username: authorName, karma: 300 });
@@ -486,15 +486,21 @@ describeDb("targeted deletion and author erasure workflows", () => {
     const authorCheck = await db().select().from(schema.redditAuthors).where(eq(schema.redditAuthors.username, authorName));
     expect(authorCheck).toHaveLength(0);
 
-    // Verify append-only audit record exists without personal info
+    // Verify append-only audit record exists with opaque non-identifying reference and no username
     const [auditEntry] = await db()
       .select()
       .from(schema.deletionAuditLog)
-      .where(eq(schema.deletionAuditLog.targetId, authorName.toLowerCase()));
+      .where(and(eq(schema.deletionAuditLog.action, "ERASE_REDDIT_AUTHOR"), eq(schema.deletionAuditLog.actor, adminContext.operatorId)))
+      .orderBy(desc(schema.deletionAuditLog.createdAt))
+      .limit(1);
     expect(auditEntry).toBeDefined();
     expect(auditEntry.action).toBe("ERASE_REDDIT_AUTHOR");
     expect(auditEntry.actor).toBe(adminContext.operatorId);
     expect(auditEntry.outcome).toBe("SUCCESS");
+    expect(auditEntry.targetId).toMatch(/^anon-author-[a-f0-9-]+$/);
+    expect(auditEntry.targetId).not.toContain(authorName.toLowerCase());
+    expect(JSON.stringify(auditEntry)).not.toContain(authorName);
+    expect(JSON.stringify(auditEntry)).not.toContain(authorName.toLowerCase());
 
     const repeatResult = await eraseRedditAuthor(authorName, { operatorContext: adminContext });
     expect(repeatResult.erased).toBe(false);
@@ -508,7 +514,7 @@ describeDb("targeted deletion and author erasure workflows", () => {
     const { db } = await import("@/db");
     const schema = await import("@/db/schema");
     const { deleteXPost, eraseXAuthor } = await import("@/lib/x/retention");
-    const { eq } = await import("drizzle-orm");
+    const { and, desc, eq } = await import("drizzle-orm");
 
     const tweetId = `tweet_${randomUUID().slice(0, 8)}`;
     const xAuthorUser = `x_author_${randomUUID().slice(0, 6)}`;
@@ -550,10 +556,16 @@ describeDb("targeted deletion and author erasure workflows", () => {
     const [authorAudit] = await db()
       .select()
       .from(schema.deletionAuditLog)
-      .where(eq(schema.deletionAuditLog.targetId, xAuthorUser.toLowerCase()));
+      .where(and(eq(schema.deletionAuditLog.action, "ERASE_X_AUTHOR"), eq(schema.deletionAuditLog.actor, adminContext.operatorId)))
+      .orderBy(desc(schema.deletionAuditLog.createdAt))
+      .limit(1);
     expect(authorAudit).toBeDefined();
     expect(authorAudit.action).toBe("ERASE_X_AUTHOR");
+    expect(authorAudit.targetId).toMatch(/^anon-author-[a-f0-9-]+$/);
+    expect(authorAudit.targetId).not.toContain(xAuthorUser.toLowerCase());
     expect(JSON.stringify(authorAudit)).not.toContain("Confidential Bio");
+    expect(JSON.stringify(authorAudit)).not.toContain(xAuthorUser);
+    expect(JSON.stringify(authorAudit)).not.toContain(xAuthorUser.toLowerCase());
   });
 
   it("deletes a project cleanly while isolating multi-tenant shared records and recording deletion audit log", async () => {
@@ -671,5 +683,328 @@ describeDb("targeted deletion and author erasure workflows", () => {
     });
 
     await db().delete(schema.users).where(inArray(schema.users.id, [owner.id, otherUser.id]));
+  });
+
+  it("strictly enforces database-level immutability on deletion_audit_log (rejects UPDATE, DELETE, TRUNCATE; permits INSERT)", async () => {
+    const { db } = await import("@/db");
+    const { sql } = await import("drizzle-orm");
+
+    // 1. Prohibit UPDATE
+    await expect(
+      db().execute(sql`UPDATE "deletion_audit_log" SET "outcome" = 'MUTATED' WHERE "action" = 'DOES_NOT_EXIST';`),
+    ).rejects.toThrow(/append-only audit ledger: UPDATE and DELETE operations are prohibited/);
+
+    // 2. Prohibit DELETE
+    await expect(
+      db().execute(sql`DELETE FROM "deletion_audit_log" WHERE "action" = 'DOES_NOT_EXIST';`),
+    ).rejects.toThrow(/append-only audit ledger: UPDATE and DELETE operations are prohibited/);
+
+    // 3. Prohibit TRUNCATE
+    await expect(
+      db().execute(sql`TRUNCATE TABLE "deletion_audit_log";`),
+    ).rejects.toThrow(/append-only audit ledger: TRUNCATE is prohibited/);
+  });
+
+  it("ensures all author erasure audit rows in deletion_audit_log have opaque target IDs and no usernames", async () => {
+    const { db } = await import("@/db");
+    const schema = await import("@/db/schema");
+    const { inArray } = await import("drizzle-orm");
+
+    const authorErasureAudits = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(inArray(schema.deletionAuditLog.action, ["ERASE_REDDIT_AUTHOR", "ERASE_X_AUTHOR"]));
+
+    for (const audit of authorErasureAudits) {
+      expect(audit.targetId).toMatch(/^anon-author-/);
+      if (audit.details) {
+        expect(audit.details).not.toHaveProperty("username");
+        expect(audit.details).not.toHaveProperty("author");
+      }
+    }
+  });
+
+  it("clears profile attributes (avatarUrl, karma, accountCreatedAt, raw) from stale referenced Reddit authors without dropping the row", async () => {
+    const { db } = await import("@/db");
+    const schema = await import("@/db/schema");
+    const { pruneOrphanedAuthors } = await import("@/lib/retention");
+    const { eq } = await import("drizzle-orm");
+
+    const staleAuthorName = `stale_ref_${randomUUID().slice(0, 6)}`;
+    await db().insert(schema.redditAuthors).values({
+      username: staleAuthorName,
+      avatarUrl: "https://reddit.com/avatar.png",
+      karma: 420,
+      accountCreatedAt: new Date("2020-01-01T00:00:00Z"),
+      raw: { bio: "Sensitive profile bio", notes: "VIP" },
+      fetchedAt: new Date(LONG_AGO * 1000), // >30 days old
+    });
+
+    // Reference this author with an ACTIVE post
+    const [activePost] = await db()
+      .insert(schema.redditPosts)
+      .values({
+        id: `p${randomUUID().slice(0, 8)}`,
+        subreddit: "saas",
+        author: staleAuthorName,
+        title: "Active recent post",
+        url: "https://reddit.com/r/saas/comments/active_author/",
+        createdAt: new Date(),
+      })
+      .returning();
+
+    // Run author pruning
+    await pruneOrphanedAuthors(POSTS_NOW);
+
+    // Stale author row MUST remain (because active post references it)
+    const [retainedAuthor] = await db()
+      .select()
+      .from(schema.redditAuthors)
+      .where(eq(schema.redditAuthors.username, staleAuthorName));
+
+    expect(retainedAuthor).toBeDefined();
+    // BUT all personal profile attributes MUST be scrubbed to null!
+    expect(retainedAuthor.avatarUrl).toBeNull();
+    expect(retainedAuthor.karma).toBeNull();
+    expect(retainedAuthor.accountCreatedAt).toBeNull();
+    expect(retainedAuthor.raw).toBeNull();
+
+    // Now delete the active post so author becomes orphaned
+    await db().delete(schema.redditPosts).where(eq(schema.redditPosts.id, activePost.id));
+
+    // Re-run pruning
+    await pruneOrphanedAuthors(POSTS_NOW);
+
+    // Author row must now be completely deleted
+    const checkDeleted = await db()
+      .select()
+      .from(schema.redditAuthors)
+      .where(eq(schema.redditAuthors.username, staleAuthorName));
+    expect(checkDeleted).toHaveLength(0);
+  });
+
+  it("preserves comment-level competitor evidence when parent post expires, until comment itself expires", async () => {
+    const { db } = await import("@/db");
+    const schema = await import("@/db/schema");
+    const { redactExpiredProviderContent } = await import("@/lib/retention");
+    const { eq } = await import("drizzle-orm");
+
+    const user = await makeUser();
+    const project = await makeProject(user.id, { name: "CompetitorRetention" });
+
+    const oldDate = new Date("1968-01-01T00:00:00Z"); // >30 days before POSTS_NOW
+    const recentDate = new Date("1969-12-25T00:00:00Z"); // <30 days before POSTS_NOW (recent!)
+
+    // Expired parent post
+    const [parentPost] = await db()
+      .insert(schema.redditPosts)
+      .values({
+        id: `p${randomUUID().slice(0, 8)}`,
+        subreddit: "saas",
+        author: "author_old",
+        title: "Old parent post title",
+        body: "Old post body",
+        url: "https://reddit.com/r/saas/comments/old_parent/",
+        createdAt: oldDate,
+      })
+      .returning();
+
+    // Recent comment on the old post
+    const [recentComment] = await db()
+      .insert(schema.redditComments)
+      .values({
+        id: `c${randomUUID().slice(0, 8)}`,
+        postId: parentPost.id,
+        author: "author_recent",
+        body: "Recent comment body discussing competitor",
+        createdAt: recentDate,
+      })
+      .returning();
+
+    // Post-level competitor mention (should be redacted when parent post expires)
+    const [postMention] = await db()
+      .insert(schema.competitorMentions)
+      .values({
+        projectId: project.id,
+        competitor: "OldCompetitor",
+        postId: parentPost.id,
+        commentId: null,
+        quote: "Parent post competitor quote",
+        summary: "Parent post summary",
+        switchingEvidence: "Parent switching",
+        explanation: "Parent explanation",
+      })
+      .returning();
+
+    // Comment-level competitor mention (should be PRESERVED because comment is recent!)
+    const [commentMention] = await db()
+      .insert(schema.competitorMentions)
+      .values({
+        projectId: project.id,
+        competitor: "RecentCompetitor",
+        postId: parentPost.id,
+        commentId: recentComment.id,
+        quote: "Recent comment competitor quote",
+        summary: "Recent comment summary",
+        switchingEvidence: "Recent switching",
+        explanation: "Recent explanation",
+      })
+      .returning();
+
+    // Run redaction as of POSTS_NOW
+    await redactExpiredProviderContent(POSTS_NOW);
+
+    // 1. Post-level mention quote & summaries are redacted
+    const [postMentionAfter] = await db()
+      .select()
+      .from(schema.competitorMentions)
+      .where(eq(schema.competitorMentions.id, postMention.id));
+    expect(postMentionAfter.quote).toBeNull();
+    expect(postMentionAfter.summary).toBeNull();
+    expect(postMentionAfter.switchingEvidence).toBeNull();
+    expect(postMentionAfter.explanation).toBeNull();
+
+    // 2. Comment-level mention quote & summaries are PRESERVED!
+    const [commentMentionAfter] = await db()
+      .select()
+      .from(schema.competitorMentions)
+      .where(eq(schema.competitorMentions.id, commentMention.id));
+    expect(commentMentionAfter.quote).toBe("Recent comment competitor quote");
+    expect(commentMentionAfter.summary).toBe("Recent comment summary");
+    expect(commentMentionAfter.switchingEvidence).toBe("Recent switching");
+    expect(commentMentionAfter.explanation).toBe("Recent explanation");
+
+    // 3. Now advance clock past comment's 30-day retention cutoff (e.g. 60 days after recentDate)
+    const futureDate = new Date(recentDate.getTime() + 60 * 24 * 3600 * 1000);
+    await redactExpiredProviderContent(futureDate);
+
+    // 4. Comment-level mention quote & summaries are now redacted!
+    const [commentMentionExpired] = await db()
+      .select()
+      .from(schema.competitorMentions)
+      .where(eq(schema.competitorMentions.id, commentMention.id));
+    expect(commentMentionExpired.quote).toBeNull();
+    expect(commentMentionExpired.summary).toBeNull();
+    expect(commentMentionExpired.switchingEvidence).toBeNull();
+    expect(commentMentionExpired.explanation).toBeNull();
+
+    await db().delete(schema.competitorMentions).where(eq(schema.competitorMentions.id, postMention.id));
+    await db().delete(schema.competitorMentions).where(eq(schema.competitorMentions.id, commentMention.id));
+    await db().delete(schema.redditComments).where(eq(schema.redditComments.id, recentComment.id));
+    await db().delete(schema.redditPosts).where(eq(schema.redditPosts.id, parentPost.id));
+    await db().delete(schema.projects).where(eq(schema.projects.id, project.id));
+    await db().delete(schema.users).where(eq(schema.users.id, user.id));
+  });
+
+  it("records batch audit events for scheduled X retention, including zero-deletion and failed runs", async () => {
+    const { db } = await import("@/db");
+    const schema = await import("@/db/schema");
+    const { deleteExpiredXData } = await import("@/lib/x/retention");
+    const { and, desc, eq } = await import("drizzle-orm");
+
+    const testClock = new Date("2015-06-01T00:00:00Z");
+
+    // 1. Zero-deletion run on empty / fresh DB
+    const resultZero = await deleteExpiredXData(testClock);
+    expect(resultZero.posts).toBe(0);
+    expect(resultZero.authors).toBe(0);
+
+    const [auditZero] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(
+        and(
+          eq(schema.deletionAuditLog.action, "TTL_BATCH_CLEANUP"),
+          eq(schema.deletionAuditLog.targetType, "x_retention_batch"),
+          eq(schema.deletionAuditLog.targetId, testClock.toISOString()),
+        ),
+      )
+      .orderBy(desc(schema.deletionAuditLog.createdAt))
+      .limit(1);
+
+    expect(auditZero).toBeDefined();
+    expect(auditZero.outcome).toBe("SUCCESS");
+    expect(auditZero.reasonCode).toBe("ROUTINE_TTL_EXPIRY");
+    expect(auditZero.details).toMatchObject({
+      source: "x",
+      deletedPosts: 0,
+      deletedAuthors: 0,
+    });
+    // Ensure no handles, tweets, or profile text logged
+    expect(JSON.stringify(auditZero)).not.toContain("username");
+    expect(JSON.stringify(auditZero)).not.toContain("text");
+
+    // 2. Positive-deletion run
+    const oldTime = new Date("2015-01-01T00:00:00Z");
+    const tweetId = `xpost_${randomUUID().slice(0, 8)}`;
+    const authorName = `xuser_${randomUUID().slice(0, 6)}`;
+    await db().insert(schema.xPosts).values({
+      id: tweetId,
+      text: "Old tweet text",
+      authorUsername: authorName,
+      createdAt: oldTime,
+      fetchedAt: oldTime,
+    });
+    await db().insert(schema.xAuthors).values({
+      username: authorName,
+      name: "Old X Name",
+      fetchedAt: oldTime,
+    });
+
+    const positiveClock = new Date("2015-06-02T00:00:00Z");
+    const resultPositive = await deleteExpiredXData(positiveClock);
+    expect(resultPositive.posts).toBeGreaterThanOrEqual(1);
+    expect(resultPositive.authors).toBeGreaterThanOrEqual(1);
+
+    const [auditPositive] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(
+        and(
+          eq(schema.deletionAuditLog.action, "TTL_BATCH_CLEANUP"),
+          eq(schema.deletionAuditLog.targetType, "x_retention_batch"),
+          eq(schema.deletionAuditLog.targetId, positiveClock.toISOString()),
+        ),
+      )
+      .orderBy(desc(schema.deletionAuditLog.createdAt))
+      .limit(1);
+
+    expect(auditPositive).toBeDefined();
+    expect(auditPositive.outcome).toBe("SUCCESS");
+    expect(auditPositive.details).toMatchObject({
+      source: "x",
+    });
+    expect(Number((auditPositive.details as Record<string, unknown>).deletedPosts)).toBeGreaterThanOrEqual(1);
+    expect(Number((auditPositive.details as Record<string, unknown>).deletedAuthors)).toBeGreaterThanOrEqual(1);
+    // Prove tweet text and author handles are absent
+    expect(JSON.stringify(auditPositive)).not.toContain("Old tweet text");
+    expect(JSON.stringify(auditPositive)).not.toContain(authorName);
+
+    // 3. Failed run handling
+    // Force RangeError by passing invalid Date (toISOString throws RangeError)
+    const invalidDate = new Date(NaN);
+    await expect(deleteExpiredXData(invalidDate)).rejects.toThrow();
+
+    // Verify a FAILURE audit event was recorded representing the failed run
+    const [failedAudit] = await db()
+      .select()
+      .from(schema.deletionAuditLog)
+      .where(
+        and(
+          eq(schema.deletionAuditLog.action, "TTL_BATCH_CLEANUP"),
+          eq(schema.deletionAuditLog.targetType, "x_retention_batch"),
+          eq(schema.deletionAuditLog.outcome, "FAILURE"),
+        ),
+      )
+      .orderBy(desc(schema.deletionAuditLog.createdAt))
+      .limit(1);
+
+    expect(failedAudit).toBeDefined();
+    expect(failedAudit.outcome).toBe("FAILURE");
+    expect(failedAudit.reasonCode).toBe("ROUTINE_TTL_FAILURE");
+    expect(failedAudit.details).toMatchObject({
+      source: "x",
+    });
+    expect((failedAudit.details as Record<string, unknown>).errorMessage).toBeDefined();
   });
 });

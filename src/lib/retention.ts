@@ -1,4 +1,5 @@
-import { and, count, eq, exists, gte, inArray, isNotNull, isNull, lt, notExists, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { and, count, eq, exists, gte, inArray, isNotNull, isNull, lt, notExists, or, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   deletionAuditLog,
@@ -177,7 +178,7 @@ export async function redactExpiredProviderContent(
       and(isNotNull(leadEvaluations.evidenceQuote), isNotNull(leadEvaluations.commentId), inArray(leadEvaluations.commentId, expiredCommentIdsSubquery)),
     );
 
-  // Scrub competitor mentions (quotes and derived summaries/explanations)
+  // Scrub post-level competitor mentions (quotes and derived summaries/explanations)
   await db()
     .update(competitorMentions)
     .set({
@@ -189,7 +190,25 @@ export async function redactExpiredProviderContent(
     .where(
       and(
         sql`(${competitorMentions.quote} is not null or ${competitorMentions.switchingEvidence} is not null or ${competitorMentions.summary} is not null or ${competitorMentions.explanation} is not null)`,
+        isNull(competitorMentions.commentId),
         inArray(competitorMentions.postId, expiredPostIdsSubquery),
+      ),
+    );
+
+  // Scrub comment-level competitor mentions (quotes and derived summaries/explanations)
+  await db()
+    .update(competitorMentions)
+    .set({
+      quote: null,
+      switchingEvidence: null,
+      summary: null,
+      explanation: null,
+    })
+    .where(
+      and(
+        sql`(${competitorMentions.quote} is not null or ${competitorMentions.switchingEvidence} is not null or ${competitorMentions.summary} is not null or ${competitorMentions.explanation} is not null)`,
+        isNotNull(competitorMentions.commentId),
+        inArray(competitorMentions.commentId, expiredCommentIdsSubquery),
       ),
     );
 
@@ -236,11 +255,26 @@ export async function pruneOrphanedAuthors(
     return Number(rows[0]?.total ?? 0);
   }
 
-  // Scrub raw API payloads on authors fetched past the 30-day retention window
+  // Scrub stale profile attributes (avatarUrl, karma, accountCreatedAt, raw) on authors fetched past the 30-day retention window
   await db()
     .update(redditAuthors)
-    .set({ raw: null })
-    .where(and(lt(redditAuthors.fetchedAt, cutoff), isNotNull(redditAuthors.raw)));
+    .set({
+      avatarUrl: null,
+      karma: null,
+      accountCreatedAt: null,
+      raw: null,
+    })
+    .where(
+      and(
+        lt(redditAuthors.fetchedAt, cutoff),
+        or(
+          isNotNull(redditAuthors.raw),
+          isNotNull(redditAuthors.avatarUrl),
+          isNotNull(redditAuthors.karma),
+          isNotNull(redditAuthors.accountCreatedAt),
+        ),
+      ),
+    );
 
   // Delete orphaned author rows in bounded batches
   return deleteInBatches(async () => {
@@ -440,6 +474,14 @@ export async function deleteRedditPost(
 }
 
 /**
+ * Generates an opaque, non-identifying target reference for author erasure audit entries.
+ * Avoids storing or deriving reversible hashes from public usernames.
+ */
+export function generateOpaqueAuthorTargetId(): string {
+  return `anon-author-${randomUUID()}`;
+}
+
+/**
  * Targeted anonymization/erasure of a Reddit author.
  * Replaces author username with '[deleted]' on posts and comments,
  * and deletes the author's row in reddit_authors.
@@ -493,13 +535,13 @@ export async function eraseRedditAuthor(
       .delete(redditAuthors)
       .where(eq(sql`lower(${redditAuthors.username})`, username.toLowerCase()));
 
-    // Persist append-only audit event in the same transaction
+    // Persist append-only audit event in the same transaction with opaque non-identifying target reference
     await tx.insert(deletionAuditLog).values({
       action: "ERASE_REDDIT_AUTHOR",
       actor: verified.operatorId,
       actorRole: verified.role,
       targetType: "reddit_author",
-      targetId: username.toLowerCase(),
+      targetId: generateOpaqueAuthorTargetId(),
       outcome: "SUCCESS",
       reasonCode: options.reason ?? "AUTHOR_ERASURE_REQUEST",
       details: {
