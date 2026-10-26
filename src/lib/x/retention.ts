@@ -1,6 +1,7 @@
 import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { xAuthors, xLanes, xPosts, xRuns } from "@/db/schema";
+import { assertAuthorizedOperator, ensureSourcePolicyFresh, type OperatorContext } from "@/lib/sourcePolicy";
 import { deleteInBatches, RETENTION_BATCH } from "@/lib/retention";
 import { daysAgo } from "@/lib/time";
 import { RETENTION_DAYS } from "@/lib/tiers";
@@ -42,4 +43,70 @@ export async function deleteExpiredXData(now = new Date()): Promise<{ posts: num
     .delete(xLanes)
     .where(and(eq(xLanes.state, "retired"), sql`coalesce(${xLanes.lastRunAt}, ${xLanes.createdAt}) < ${history.toISOString()}::timestamptz`));
   return { posts, authors: authors.length };
+}
+
+/**
+ * Targeted deletion of an X tweet and cascading downstream records.
+ * Idempotent, transaction-safe, and does not retain tweet text in audit logs.
+ */
+export async function deleteXPost(
+  tweetId: string,
+  options: { operatorContext?: OperatorContext; dryRun?: boolean } = {},
+): Promise<{ deleted: boolean; notFound?: boolean; dryRun?: boolean; tweetId: string }> {
+  if (options.operatorContext) {
+    await ensureSourcePolicyFresh();
+    assertAuthorizedOperator(options.operatorContext);
+  }
+
+  const existing = await db()
+    .select({ id: xPosts.id })
+    .from(xPosts)
+    .where(eq(xPosts.id, tweetId));
+
+  if (existing.length === 0) {
+    return { deleted: false, notFound: true, tweetId };
+  }
+
+  if (options.dryRun) {
+    return { deleted: false, dryRun: true, tweetId };
+  }
+
+  return db().transaction(async (tx) => {
+    await tx.delete(xPosts).where(eq(xPosts.id, tweetId));
+
+    return { deleted: true, tweetId };
+  });
+}
+
+/**
+ * Targeted deletion of an X author profile and facts.
+ * Idempotent, transaction-safe, and does not retain author bio/personal text in audit logs.
+ */
+export async function eraseXAuthor(
+  username: string,
+  options: { operatorContext?: OperatorContext; dryRun?: boolean } = {},
+): Promise<{ erased: boolean; notFound?: boolean; dryRun?: boolean; username: string }> {
+  if (options.operatorContext) {
+    await ensureSourcePolicyFresh();
+    assertAuthorizedOperator(options.operatorContext);
+  }
+
+  const existing = await db()
+    .select({ username: xAuthors.username })
+    .from(xAuthors)
+    .where(eq(sql`lower(${xAuthors.username})`, username.toLowerCase()));
+
+  if (existing.length === 0) {
+    return { erased: false, notFound: true, username };
+  }
+
+  if (options.dryRun) {
+    return { erased: false, dryRun: true, username };
+  }
+
+  return db().transaction(async (tx) => {
+    await tx.delete(xAuthors).where(eq(sql`lower(${xAuthors.username})`, username.toLowerCase()));
+
+    return { erased: true, username };
+  });
 }

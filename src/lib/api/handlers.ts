@@ -1,3 +1,4 @@
+import { deleteProject } from "@/lib/projects";
 import { RETENTION_DAYS } from "@/lib/tiers";
 import { xEnabledFor } from "@/lib/x/enabled";
 import { isSourceAuthorized, type SourceOperationRequest } from "@/lib/sourcePolicy";
@@ -75,6 +76,14 @@ export async function projects(caller: ApiCaller) {
 export async function project(caller: ApiCaller, projectId: string) {
   const row = await requireProject(caller.user.id, projectId);
   return { project: await getApiProject(row) };
+}
+
+export async function deleteProjectHandler(caller: ApiCaller, projectId: string) {
+  const result = await deleteProject(caller.user.id, projectId);
+  if (!result.deleted) {
+    throw new ApiError("not_found", "No project with that id.");
+  }
+  return { deleted: true, id: projectId };
 }
 
 export async function projectLeads(

@@ -3,6 +3,8 @@ import { and, asc, eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { db } from "@/db";
 import { projects, users } from "@/db/schema";
+import { forgetProjectFeed } from "./projectFeedCache";
+import { assertAuthorizedOperator, ensureSourcePolicyFresh, type OperatorContext } from "./sourcePolicy";
 import { limitsFor } from "./tiers";
 import { config } from "./config";
 import { tierNameFor } from "./anyapi";
@@ -71,5 +73,48 @@ export async function requireActiveProject(userId: string, requested?: string): 
   if (!project) {
     redirect("/app/projects/new");
   }
-  return project;
+return project;
+}
+
+/**
+ * Deletes a customer's project and cascades all project-associated records.
+ * Leaves shared multi-tenant records (reddit_posts, reddit_authors, search_runs) intact
+ * so other customers' independent tracking is never affected.
+ * Idempotent: repeated calls cleanly return notFound: true without errors.
+ * Auditable: records action without retaining personal or provider content in the audit log.
+ */
+export async function deleteProject(
+  userId: string,
+  projectId: string,
+  options: { operatorContext?: OperatorContext } = {},
+): Promise<{ deleted: boolean; notFound?: boolean; projectId: string }> {
+  let isOperator = false;
+  if (options.operatorContext) {
+    await ensureSourcePolicyFresh();
+    assertAuthorizedOperator(options.operatorContext);
+    isOperator = true;
+  }
+
+  return db().transaction(async (tx) => {
+    const existing = await tx
+      .select({ id: projects.id, userId: projects.userId })
+      .from(projects)
+      .where(
+        isOperator
+          ? eq(projects.id, projectId)
+          : and(eq(projects.id, projectId), eq(projects.userId, userId)),
+      )
+      .for("update");
+
+    if (existing.length === 0) {
+      return { deleted: false, notFound: true, projectId };
+    }
+
+    // Cascade deletion of all project-scoped tables in PostgreSQL
+    await tx.delete(projects).where(eq(projects.id, projectId));
+
+    forgetProjectFeed(projectId);
+
+    return { deleted: true, projectId };
+  });
 }
